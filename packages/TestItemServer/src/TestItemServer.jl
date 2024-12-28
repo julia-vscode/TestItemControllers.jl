@@ -20,14 +20,16 @@ mutable struct Testsetup
     evaled::Bool
 end
 
-mutable struct TestProcessState
+mutable struct TestProcessState{ERR_HANDLER<:Function}
+    err_handler::Union{Nothing,ERR_HANDLER}
+
     testrun_id::Union{Nothing,String}
     test_setups::Dict{Tuple{String,Symbol},Testsetup}
     is_batch_running::Bool
     stolen_test_items::Set{String}
 
-    function TestProcessState()
-        return new(nothing, Dict{Tuple{String,Symbol},Testsetup}(), false, Set{String}())
+    function TestProcessState(err_handler::ERR_HANDLER = nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
+        return new{ERR_HANDLER}(err_handler, nothing, Dict{Tuple{String,Symbol},Testsetup}(), false, Set{String}())
     end
 end
 
@@ -478,7 +480,12 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
             state.testrun_id
         )
     catch err
-        Base.display_error(err, catch_backtrace())
+        bt = catch_backtrace()
+        if state.err_handler !== nothing
+            state.err_handler(err, bt)
+        else
+            Base.display_error(err, bt)
+        end
     end
 
     return nothing
@@ -545,7 +552,12 @@ function start_debug_backend(debug_pipename, error_handler)
             end
         end
     catch err
-        error_handler(err, Base.catch_backtrace())
+        bt = catch_backtrace()
+        if err_handler !== nothing
+            err_handler(err, bt)
+        else
+            Base.display_error(err, bt)
+        end
     end
 
     take!(ready)
@@ -691,7 +703,7 @@ function serve(pipename, debug_pipename, error_handler=nothing)
 
     run(conn_endpoint[])
 
-    state = TestProcessState()
+    state = TestProcessState(error_handler)
 
     while true
         msg = JSONRPC.get_next_message(conn_endpoint[])

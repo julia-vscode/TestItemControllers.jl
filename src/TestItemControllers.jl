@@ -169,7 +169,7 @@ function revise(tp::TestProcess, test_env_content_hash::Union{Int,Nothing})
     put!(tp.channel_to_sub, (source=:controller, msg=(;command=:revise, test_env_content_hash=test_env_content_hash)))
 end
 
-function start(tp::TestProcess)
+function start(tp::TestProcess, controller)
     put!(tp.parent_channel, (source=:testprocess, msg=(event=:test_process_status_changed, id=tp.id, status="Launching")))
 
     pipe_name = JSONRPC.generate_pipe_name()
@@ -207,9 +207,12 @@ function start(tp::TestProcess)
         jlEnv["JULIA_NUM_THREADS"] = tp.env.juliaNumThreads
     end
 
+    error_handler_file = controller.error_handler_file === nothing ? [] : [controller.error_handler_file]
+    crash_reporting_pipename = controller.crash_reporting_pipename === nothing ? [] : [controller.crash_reporting_pipename]
+
     tp.jl_process = open(
         pipeline(
-            Cmd(`$(tp.env.juliaCmd) $(tp.env.juliaArgs) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(tp.debug_pipe_name)`, detach=false, env=jlEnv),
+            Cmd(`$(tp.env.juliaCmd) $(tp.env.juliaArgs) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(tp.debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
             stdout = pipe_out,
             stderr = pipe_err
         )
@@ -226,7 +229,12 @@ function start(tp::TestProcess)
             sleep(0.5)
         end
     catch err
-        Base.display_error(err, catch_backtrace())
+        bt = catch_backtrace()
+        if controller.err_handler !== nothing
+            controller.err_handler(err, bt)
+        else
+            Base.display_error(err, bt)
+        end
     end
 
     @async try
@@ -244,7 +252,12 @@ function start(tp::TestProcess)
         end
     catch err
         if !tp.killed
-            Base.display_error(err, catch_backtrace())
+            bt = catch_backtrace()
+            if controller.err_handler !== nothing
+                controller.err_handler(err, bt)
+            else
+                Base.display_error(err, bt)
+            end
         end
     end
 
@@ -324,7 +337,7 @@ function start(tp::TestProcess)
                         @info "Revise could not handle changes or test env was changed, restarting process"
                         kill(tp.jl_process)
                         tp.comms_established = Channel{Bool}(1)
-                        start(tp)
+                        start(tp, controller)
                         fetch(tp.comms_established)
                         activate_env(tp)
                         break
@@ -388,7 +401,12 @@ function start(tp::TestProcess)
             end
         end
     catch err
-        Base.display_error(err, catch_backtrace())
+        bt = catch_backtrace()
+        if controller.err_handler !== nothing
+            controller.err_handler(err, bt)
+        else
+            Base.display_error(err, bt)
+        end
     end
 end
 
@@ -396,13 +414,20 @@ function activate_env(tp::TestProcess)
     put!(tp.channel_to_sub, (source=:controller, msg=(;command=:activate)))
 end
 
-function run_testitems(test_process::TestProcess, testitems::AbstractVector{TestItemControllerProtocol.TestItem}, testrunid::String, testsetups)
+function run_testitems(test_process::TestProcess, testitems::AbstractVector{TestItemControllerProtocol.TestItem}, testrunid::String, testsetups, controller)
     empty!(test_process.testitems_to_run)
     append!(test_process.testitems_to_run, testitems)
-    @async begin
+    @async try
         fetch(test_process.activated)
 
         put!(test_process.channel_to_sub, (source=:controller, msg=(;command=:run, testsetups = testsetups)))
+    catch err
+        bt = catch_backtrace()
+        if controller.err_handler !== nothing
+            controller.err_handler(err, bt)
+        else
+            Base.display_error(err, bt)
+        end
     end
 end
 
@@ -420,7 +445,16 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
 
     coverage::Dict{String,Vector{CoverageTools.FileCoverage}}
 
-    function JSONRPCTestItemController(pipe_in, pipe_out, err_handler::ERR_HANDLER) where {ERR_HANDLER<:Union{Function,Nothing}}
+    error_handler_file::Union{Nothing,String}
+    crash_reporting_pipename::Union{Nothing,String}
+
+    function JSONRPCTestItemController(
+        pipe_in,
+        pipe_out,
+        err_handler::ERR_HANDLER;
+        error_handler_file=nothing,
+        crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
+
         endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out, err_handler)
         return new{ERR_HANDLER}(
             err_handler,
@@ -429,7 +463,9 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
             Dict{String,TestRun}(),
             Dict{TestEnvironment,Vector{TestProcess}}(),
             Set{TestEnvironment}(),
-            Dict{String,Vector{CoverageTools.FileCoverage}}()
+            Dict{String,Vector{CoverageTools.FileCoverage}}(),
+            error_handler_file,
+            crash_reporting_pipename
         )
     end
 end
@@ -546,7 +582,7 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
                     env = k.env
                 )
             )
-            start(p)
+            start(p, controller)
             p.test_run_id = params.testRunId
             p.test_setups = [
                 TestItemServerProtocol.TestsetupDetails(
@@ -571,7 +607,12 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
 
                     put!(precompile_done, true)
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    bt = catch_backtrace()
+                    if controller.err_handler !== nothing
+                        controller.err_handler(err, bt)
+                    else
+                        Base.display_error(err, bt)
+                    end
                 end
             else
                 @async try
@@ -580,7 +621,12 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
 
                     activate_env(p)
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    bt = catch_backtrace()
+                    if controller.err_handler !== nothing
+                        controller.err_handler(err, bt)
+                    else
+                        Base.display_error(err, bt)
+                    end
                 end
             end
         end
@@ -595,7 +641,12 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
                 end
                 JSONRPC.send(endpoint, TestItemControllerProtocol.notificationTypeLaunchDebuggers, (;debugPipeNames = map(i->i.debug_pipe_name, our_procs[k]), testRunId = params.testRunId))
             catch err
-                Base.display_error(err, catch_backtrace())
+                bt = catch_backtrace()
+                if controller.err_handler !== nothing
+                    controller.err_handler(err, bt)
+                else
+                    Base.display_error(err, bt)
+                end
             end
         end
 
@@ -604,7 +655,7 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
         chunks =  makechunks(v, n_procs)
 
         for (i,p) in enumerate(our_procs[k])
-            run_testitems(p, chunks[i], params.testRunId, params.testSetups)
+            run_testitems(p, chunks[i], params.testRunId, params.testSetups, controller)
         end
     end
 
@@ -794,7 +845,7 @@ function Base.run(controller::JSONRPCTestItemController)
                         )
                     )
 
-                    run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing)
+                    run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing, controller)
                 end
             else
                 error("Unknown message")
