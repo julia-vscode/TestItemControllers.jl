@@ -1,22 +1,22 @@
-include("../../../../TestEnv/src/TestEnv.jl")
-include("../../../../URIParser/src/URIParser.jl")
-include("../../../../JSON/src/JSON.jl")
-include("../../../../OrderedCollections/src/OrderedCollections.jl")
-include("../../../../CodeTracking/src/CodeTracking.jl")
-include("../../../../CoverageTools/src/CoverageTools.jl")
-include(joinpath(homedir(), ".julia/dev/IOCapture/src/IOCapture.jl"))
+include("../../TestEnv/src/TestEnv.jl")
+include("../../URIParser/src/URIParser.jl")
+include("../../JSON/src/JSON.jl")
+include("../../OrderedCollections/src/OrderedCollections.jl")
+include("../../CodeTracking/src/CodeTracking.jl")
+include("../../CoverageTools/src/CoverageTools.jl")
+include("../../IOCapture/src/IOCapture.jl")
 
 module JSONRPC
 import ..JSON
 import UUIDs
-include("../../../../JSONRPC/src/packagedef.jl")
+include("../../JSONRPC/src/packagedef.jl")
 end
 
 module JuliaInterpreter
     using ..CodeTracking
 
     @static if VERSION >= v"1.6.0"
-        include("../../../../JuliaInterpreter/src/packagedef.jl")
+        include("../../JuliaInterpreter/src/packagedef.jl")
     else
         include("../../../../../packages-old/v1.5/JuliaInterpreter/src/packagedef.jl")
     end
@@ -30,7 +30,7 @@ module LoweredCodeUtils
         is_return, lookup_return
 
     @static if VERSION >= v"1.6.0"
-        include("../../../../LoweredCodeUtils/src/packagedef.jl")
+        include("../../LoweredCodeUtils/src/packagedef.jl")
     else
         include("../../../../../packages-old/v1.5/LoweredCodeUtils/src/packagedef.jl")
     end
@@ -47,7 +47,7 @@ module Revise
         linetable, codelocs, LineTypes, isassign, isidentical
     using ..LoweredCodeUtils: next_or_nothing!, trackedheads, callee_matches
     @static if VERSION >= v"1.6.0"
-        include("../../../../Revise/src/packagedef.jl")
+        include("../../Revise/src/packagedef.jl")
     else
         include("../../../../../packages-old/v1.5/Revise/src/packagedef.jl")
     end
@@ -58,5 +58,5 @@ module DebugAdapter
     import ..JuliaInterpreter
     import ..JSON
 
-    include("../../../../DebugAdapter/src/packagedef.jl")
+    include("../../DebugAdapter/src/packagedef.jl")
 end
