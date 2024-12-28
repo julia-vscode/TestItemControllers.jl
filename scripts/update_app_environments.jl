@@ -14,11 +14,11 @@ julia_versions = [
 ]
 
 for i in julia_versions
-    version_path = normpath(joinpath(@__DIR__, "../packages/TestItemServer/app/environments/v$i"))
+    version_path = normpath(joinpath(@__DIR__, "../testprocess/environments/v$i"))
     mkpath(version_path)
-    run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../.."))'`, dir=version_path))
+    run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../TestItemServer"))'`, dir=version_path))
 end
 
-version_path = normpath(joinpath(@__DIR__, "../packages/TestItemServer/app/environments/fallback"))
+version_path = normpath(joinpath(@__DIR__, "../testprocess/environments/fallback"))
 mkpath(version_path)
-run(Cmd(`julia +nightly --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../.."))'`, dir=version_path))
+run(Cmd(`julia +nightly --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../TestItemServer"))'`, dir=version_path))
