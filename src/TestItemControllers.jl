@@ -175,7 +175,7 @@ function start(tp::TestProcess, controller)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
-    testserver_script = joinpath(@__DIR__, "../packages/TestItemServer/app/testserver_main.jl")
+    testserver_script = joinpath(@__DIR__, "../testprocess/app/testserver_main.jl")
 
     pipe_out = IOBuffer()
     pipe_err = IOBuffer()
