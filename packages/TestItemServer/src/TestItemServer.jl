@@ -131,7 +131,7 @@ function process_coverage_data(coverage_results)
     return coverage_info
 end
 
-function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, testrun_id::String, mode::String, coverage_root_uris::Union{Nothing,Vector{String}})
+function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, testrun_id::String, mode::String, coverage_root_uris::Union{Nothing,Vector{String}}, state::TestProcessState)
     JSONRPC.send(
         endpoint,
         TestItemServerProtocol.started_notification_type,
@@ -147,7 +147,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, test
     coverage_results = CoverageTools.FileCoverage[] # This will hold the results of various coverage sprints
 
     for i in params.testSetups
-        if !haskey(TESTSETUPS, (params.packageUri, Symbol(i)))
+        if !haskey(state.test_setups, (params.packageUri, Symbol(i)))
             return (
                 TestItemServerProtocol.errored_notification_type,
                 TestItemServerProtocol.ErroredParams(
@@ -167,7 +167,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, test
             )
         end
 
-        setup_details = TESTSETUPS[(params.packageUri, Symbol(i))]
+        setup_details = state.test_setups[(params.packageUri, Symbol(i))]
 
         if setup_details.kind==:module && !setup_details.evaled
             mod = Core.eval(Main.Testsetups, :(module $(Symbol(i)) end))
@@ -279,7 +279,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, test
     end
 
     for i in params.testSetups
-        testsetup_details = TESTSETUPS[(params.packageUri,Symbol(i))]
+        testsetup_details = state.test_setups[(params.packageUri,Symbol(i))]
 
         try
             if testsetup_details.kind==:module
@@ -447,7 +447,7 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
                 )
             else
                 c = IOCapture.capture() do
-                    run_testitem(endpoint, i, params.testRunId, params.mode, coalesce(params.coverageRootUris, nothing))
+                    run_testitem(endpoint, i, params.testRunId, params.mode, coalesce(params.coverageRootUris, nothing), state)
                 end
 
                 JSONRPC.send(
@@ -584,7 +584,7 @@ function activate_env_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestIte
         else
             Pkg.activate(uri2filepath(params.projectUri))
 
-            if params.packageName===missing
+            if params.packageName!==missing
                 TestEnv.activate(params.packageName)
             end
         end

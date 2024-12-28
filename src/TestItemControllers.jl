@@ -502,7 +502,16 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
 
         for p in Iterators.take(existing_idle_procs, v)
             p.test_run_id = params.testRunId
-            p.test_setups = params.testSetups
+            p.test_setups = [
+                TestItemServerProtocol.TestsetupDetails(
+                    packageUri = i.packageUri,
+                    name = i.name,
+                    kind = i.kind,
+                    uri = i.uri,
+                    line = i.line,
+                    column = i.column,
+                    code = i.code
+                ) for i in params.testSetups]
             push!(our_procs[k], p)
 
             revise(p, env_content_hash_by_env[k])
@@ -539,7 +548,17 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
             )
             start(p)
             p.test_run_id = params.testRunId
-            p.test_setups = params.testSetups
+            p.test_setups = [
+                TestItemServerProtocol.TestsetupDetails(
+                    packageUri = i.packageUri,
+                    name = i.name,
+                    kind = i.kind,
+                    uri = i.uri,
+                    line = i.line,
+                    column = i.column,
+                    code = i.code
+                ) for i in params.testSetups]
+
             push!(procs, p)
             push!(controller.testprocesses[k], p)
 
