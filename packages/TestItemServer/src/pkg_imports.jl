@@ -15,10 +15,12 @@ end
 module JuliaInterpreter
     using ..CodeTracking
 
-    @static if VERSION >= v"1.6.0"
+    @static if VERSION >= v"1.10.0"
         include("../../JuliaInterpreter/src/packagedef.jl")
+    elseif VERSION >= v"1.6.0"
+        include("../../../packages-old/v1.9/JuliaInterpreter/src/packagedef.jl")
     else
-        include("../../../../../packages-old/v1.5/JuliaInterpreter/src/packagedef.jl")
+        include("../../../packages-old/v1.5/JuliaInterpreter/src/packagedef.jl")
     end
 end
 
@@ -29,10 +31,12 @@ module LoweredCodeUtils
         next_until!, finish_and_return!, get_return, nstatements, codelocation, linetable,
         is_return, lookup_return
 
-    @static if VERSION >= v"1.6.0"
+    @static if VERSION >= v"1.10.0"
         include("../../LoweredCodeUtils/src/packagedef.jl")
+    elseif VERSION >= v"1.6.0"
+        include("../../../packages-old/v1.9/LoweredCodeUtils/src/packagedef.jl")
     else
-        include("../../../../../packages-old/v1.5/LoweredCodeUtils/src/packagedef.jl")
+        include("../../../packages-old/v1.5/LoweredCodeUtils/src/packagedef.jl")
     end
 end
 
@@ -46,10 +50,11 @@ module Revise
         @lookup, moduleof, scopeof, pc_expr, is_quotenode_egal,
         linetable, codelocs, LineTypes, isassign, isidentical
     using ..LoweredCodeUtils: next_or_nothing!, trackedheads, callee_matches
+
     @static if VERSION >= v"1.6.0"
         include("../../Revise/src/packagedef.jl")
     else
-        include("../../../../../packages-old/v1.5/Revise/src/packagedef.jl")
+        include("../../../packages-old/v1.5/Revise/src/packagedef.jl")
     end
 end
 
