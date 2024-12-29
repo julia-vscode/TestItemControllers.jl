@@ -662,10 +662,14 @@ end
 
 function steal_testitems_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState)
     state.testrun_id == params.testRunId || error("Invalid test process state")
-    state.is_batch_running == true || error("Invalid state")
 
-    for i in params.testItemIds
-        push!(state.stolen_test_items, i)
+    # If we are no longer running a batch, the steal message came to late, we
+    # apparently finished all test item between the moment when the steal test items
+    # were computed and this message was received. So we just ignore.
+    if state.is_batch_running
+        for i in params.testItemIds
+            push!(state.stolen_test_items, i)
+        end
     end
 
     return nothing
