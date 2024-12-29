@@ -1,8 +1,16 @@
 module TestItemControllers
 
-import AutoHashEquals, JSONRPC, Sockets, UUIDs, CoverageTools, URIParser
+import Sockets, UUIDs
 
-using AutoHashEquals: @auto_hash_equals
+include("../packages/URIParser/src/URIParser.jl")
+include("../packages/CoverageTools/src/CoverageTools.jl")
+include("../packages/JSON/src/JSON.jl")
+
+module JSONRPC
+    import ..JSON
+    import UUIDs
+    include("../packages/JSONRPC/src/packagedef.jl")
+end
 
 export JSONRPCTestItemController
 
@@ -10,7 +18,7 @@ include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
 
-@auto_hash_equals struct TestEnvironment
+struct TestEnvironment
     project_uri:: Union{Nothing,String}
     package_uri::String
     package_name::String
@@ -20,6 +28,10 @@ include("../shared/urihelper.jl")
     mode::String
     env::Dict{String,String}
 end
+
+Base.hash(x::TestEnvironment, h::UInt) = hash(x.env, hash(x.mode, hash(x.juliaNumThreads, hash(x.juliaArgs, hash(x.juliaCmd, hash(x.package_name, hash(x.package_uri, hash(x.project_uri, hash(:TestEnvironment, h)))))))))
+Base.(:(==))(a::TestEnvironment, b::TestEnvironment) = a.project_uri == b.project_uri && a.package_uri == b.package_uri && a.package_name == b.package_name && a.juliaCmd == b.juliaCmd && a.juliaArgs == b.juliaArgs && a.juliaNumThreads == b.juliaNumThreads && a.mode == b.mode && a.env == b.env
+Base.isequal(a::TestEnvironment, b::TestEnvironment) = isequal(a.project_uri, b.project_uri) && isequal(a.package_uri, b.package_uri) && isequal(a.package_name, b.package_name) && isequal(a.juliaCmd, b.juliaCmd) && isequal(a.juliaArgs, b.juliaArgs) && isequal(a.juliaNumThreads, b.juliaNumThreads) && isequal(a.mode, b.mode) && isequal(a.env, b.env)
 
 function started_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.StartedParams, test_process)
     put!(test_process.parent_channel, (source=:testprocess, msg=(event=:started, testitemid=params.testItemId, testrunid=params.testRunId)))
