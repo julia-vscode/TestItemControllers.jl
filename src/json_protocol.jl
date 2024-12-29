@@ -1,8 +1,8 @@
 module TestItemControllerProtocol
 
-import JSONRPC
+import ..JSONRPC
 
-using JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
+using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 
 @dict_readable struct TestItem
     id::String
