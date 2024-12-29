@@ -397,7 +397,7 @@ function stack_trace_request(debug_session::DebugSession, params::StackTraceArgu
                 JuliaInterpreter.replace_coretypes!(src; rev = true)
                 code = Base.invokelatest(JuliaInterpreter.framecode_lines, src)
 
-                source_name = string(UUIDs.uuid4())
+                source_name = string(uuid4())
 
                 DebugEngines.set_source(debug_session.debug_engine, source_name, join(code, '\n'))
                 source_id = DebugEngines.get_source_id(debug_session.debug_engine, source_name)
@@ -916,10 +916,6 @@ end
 
 function evaluate_request(debug_session::DebugSession, params::EvaluateArguments)
     @debug "evaluate_request"
-
-    if ismissing(params.frameId)
-        @info "evaluate_request called with missing frameId" params
-    end
 
     curr_fr = debug_session.debug_engine.frame
     curr_i = 1

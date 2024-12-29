@@ -1,7 +1,7 @@
 
 # include("../../VSCodeServer/src/repl.jl")
 
-import Sockets, Base64, UUIDs
+import Sockets, Base64
 
 module DAPRPC
     using ..JSON
@@ -191,7 +191,6 @@ function terminate(debug_session::DebugSession)
     if debug_session.debug_engine!==nothing
         DebugEngines.execution_terminate(debug_session.debug_engine)
     end
-    put!(debug_session.next_cmd, (;cmd=:terminate))
 end
 
 function Base.close(debug_session::DebugSession)
