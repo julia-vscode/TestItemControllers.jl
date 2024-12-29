@@ -49,6 +49,14 @@ for (pkg,github_location) in packages
 
     
     if latest_version != current_version        
-        run(addenv(Cmd(`git subtree pull --prefix packages/$pkg https://github.com/$github_location v$latest_version --squash`, dir=normpath(joinpath(@__DIR__, "..")))), Dict("GIT_MERGE_AUTOEDIT" => "no"))
+        run(
+            addenv(
+                Cmd(
+                    `git subtree pull --prefix packages/$pkg https://github.com/$github_location v$latest_version --squash`,
+                    dir=normpath(joinpath(@__DIR__, ".."))
+                ),
+                Dict("GIT_MERGE_AUTOEDIT" => "no")
+            )
+        )
     end
 end
