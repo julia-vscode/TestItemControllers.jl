@@ -224,7 +224,7 @@ function start(tp::TestProcess, controller)
 
     tp.jl_process = open(
         pipeline(
-            Cmd(`$(tp.env.juliaCmd) $(tp.env.juliaArgs) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(tp.debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
+            Cmd(`$(tp.env.juliaCmd) $(tp.env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(tp.debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
             stdout = pipe_out,
             stderr = pipe_err
         )
