@@ -483,6 +483,9 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
 end
 
 @views function makechunks(X::AbstractVector, n::Integer)
+    if n<1
+        error("n is smaller than 1")
+    end
     c = length(X) ÷ n
     return [X[1+c*k:(k == n-1 ? end : c*k+c)] for k = 0:n-1]
 end
