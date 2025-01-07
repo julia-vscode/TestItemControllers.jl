@@ -8,7 +8,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     id::String
     uri::String
     label::String
-    packageName::String
+    packageName::Union{Missing,String}
     packageUri::Union{Missing,String}
     projectUri::Union{Missing,String}
     envContentHash::Union{Missing,Int}
@@ -21,12 +21,14 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     line::Int
     column::Int
     code::String
+    codeLine::Int
+    codeColumn::Int
     mode::String
     # cover
 end
 
 @dict_readable struct TestSetupDetail
-    packageUri::String
+    packageUri::Union{Missing,String}
     name::String
     kind::String
     uri::String

@@ -396,8 +396,8 @@ function start(tp::TestProcess, controller)
                                     packageUri = i.packageUri,
                                     useDefaultUsings = i.useDefaultUsings,
                                     testSetups = i.testSetups,
-                                    line = i.line,
-                                    column = i.column,
+                                    line = i.codeLine,
+                                    column = i.codeColumn,
                                     code = i.code,
                                 ) for i in tp.testitems_to_run
                             ],
@@ -492,6 +492,10 @@ end
 
 function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemControllerProtocol.CreateTestRunParams, controller::JSONRPCTestItemController)
     @info "Creating new test run"
+
+    valid_test_items = [i for i in params.testItems if i.packageName !== missing && i.packageUri !== missing]
+    test_items_without_package = [i for i in params.testItems if i.packageName === missing || i.packageUri === missing]
+
     our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
 
     test_run = TestRun(params.testRunId, true, Set(i.id for i in params.testItems), our_procs)
@@ -504,7 +508,7 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
 
     env_content_hash_by_env = Dict{TestEnvironment,Int}()
 
-    for i in params.testItems
+    for i in valid_test_items
         te = TestEnvironment(
             coalesce(i.projectUri, nothing),
             i.packageUri,
@@ -534,9 +538,9 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
     proc_count_by_env = Dict{TestEnvironment,Int}()
 
     for (k,v) in pairs(testitems_by_env)
-        as_share = length(v)/length(params.testItems)
+        as_share = length(v)/length(valid_test_items)
 
-        proc_count_by_env[k] = min(floor(Int, max_procs * as_share), length(params.testItems))
+        proc_count_by_env[k] = min(floor(Int, max_procs * as_share), length(valid_test_items))
     end
 
     # Grab existing procs
@@ -674,6 +678,11 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
         end
     end
 
+    # Finally, we send error notifications for all test items that didn't have a package
+    for i in test_items_without_package
+        put!(controller.combined_msg_queue, (source=:testcontroller, msg=(event=:errored, testitemid=i.id, testrunid=params.testRunId, message="Test item '$(i.label)' is not inside a Julia package. Test items must be inside a package to be run.", uri=i.uri, line=i.line, column=i.column)))
+    end
+
     nothing
 end
 
@@ -729,6 +738,30 @@ function Base.run(controller::JSONRPCTestItemController)
 
         if msg.source==:client
             dispatch_msg(controller.endpoint, msg.msg, controller)
+        elseif msg.source==:testcontroller
+            if msg.msg.event==:errored
+                test_run = controller.testruns[msg.msg.testrunid]
+
+                delete!(test_run.testitem_ids, msg.msg.testitemid)
+                params = TestItemControllerProtocol.TestItemErroredParams(
+                    testRunId=msg.msg.testrunid,
+                    testItemId=msg.msg.testitemid,
+                    messages = TestItemControllerProtocol.TestMessage[
+                        TestItemControllerProtocol.TestMessage(
+                            message = msg.msg.message,
+                            expectedOutput = missing,
+                            actualOutput = missing,
+                            uri = msg.msg.uri,
+                            line = msg.msg.line,
+                            column = msg.msg.column
+                        )
+                    ],
+                    duration=missing
+                )
+                JSONRPC.send(controller.endpoint, TestItemControllerProtocol.notficiationTypeTestItemErrored, params)
+            else
+                error("Unknown message")
+            end
         elseif msg.source==:testprocess
             if msg.msg.event == :started
                 JSONRPC.send(controller.endpoint, TestItemControllerProtocol.notficiationTypeTestItemStarted, TestItemControllerProtocol.TestItemStartedParams(testRunId=msg.msg.testrunid, testItemId=msg.msg.testitemid))
