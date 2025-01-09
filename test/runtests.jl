@@ -1722,6 +1722,35 @@ end
         rm_precompile("Timing")
     end
 
+    do_test("DO NOT PARSE") && @testset "DO NOT PARSE" begin
+        testdir = newtestdir()
+        dn = joinpath(testdir, "DoNotParse", "src")
+        mkpath(dn)
+        write(joinpath(dn, "DoNotParse.jl"), """
+            # REVISE: DO NOT PARSE
+            module DoNotParse
+            f(x) = 1
+            end
+            """)
+        sleep(mtimedelay)
+        @eval using DoNotParse
+        sleep(mtimedelay)
+        @test DoNotParse.f(1) == 1
+        write(joinpath(dn, "DoNotParse.jl"), """
+            # REVISE: DO NOT PARSE
+            module DoNotParse
+            f(x) = 2
+            end
+            """)
+        logs, _ = Test.collect_test_logs() do
+            yry()
+        end
+        @test DoNotParse.f(1) == 1
+        @test isempty(logs)
+        rm_precompile("DoNotParse")
+        pop!(LOAD_PATH)
+    end
+
     do_test("Method deletion") && @testset "Method deletion" begin
         Core.eval(Base, :(revisefoo(x::Float64) = 1)) # to test cross-module method scoping
         testdir = newtestdir()
@@ -2260,6 +2289,42 @@ end
         @test lines[1] == "ERROR: BoundsError: attempt to access 3-element $(Vector{Int}) at index [4]"
         @test any(str -> endswith(str, "callee_error.jl:12"), lines)
         @test_throws UndefVarError CalleeError.foo(0.1f0)
+
+        # Issue #877 (lowering errors)
+        file = joinpath(testdir, "goodbadfile.jl")
+        write(file, """
+            function f877()
+                for i in 1:10
+                    # 1=2   #uncomment to trigger error
+                end
+            end
+            """)
+        includet(file)
+        @test !isempty(methods(f877))
+        sleep(mtimedelay)
+        write(file, """
+            function f877()
+                for i in 1:10
+                    1=2   #uncomment to trigger error
+                end
+            end
+            """)
+        sleep(mtimedelay)
+        logs, _ = Test.collect_test_logs() do
+            yry()
+        end
+        @test isempty(methods(f877))
+        sleep(mtimedelay)
+        write(file, """
+            function f877()
+                for i in 1:10
+                    # 1=2   #uncomment to trigger error
+                end
+            end
+            """)
+        sleep(mtimedelay)
+        yry()
+        @test !isempty(methods(f877))
     end
 
     do_test("Retry on InterruptException") && @testset "Retry on InterruptException" begin
