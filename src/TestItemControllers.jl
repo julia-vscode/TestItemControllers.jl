@@ -233,10 +233,12 @@ function start(tp::TestProcess, controller)
     @async try
         while true
             s = String(take!(pipe_out))
-            print(s)
+            print(stderr, s)
+            Base.flush(stderr)
 
             s = String(take!(pipe_err))
-            print(s)
+            print(stderr, s)
+            Base.flush(stderr)
 
             sleep(0.5)
         end

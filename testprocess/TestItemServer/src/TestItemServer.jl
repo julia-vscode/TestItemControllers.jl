@@ -448,7 +448,8 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
                     )
                 )
             else
-                c = IOCapture.capture() do
+
+                c = IOCapture.capture(passthrough=true) do
                     run_testitem(endpoint, i, params.testRunId, params.mode, coalesce(params.coverageRootUris, nothing), state)
                 end
 
