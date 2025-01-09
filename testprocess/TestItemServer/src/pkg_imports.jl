@@ -5,8 +5,10 @@ include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
 include("../../../packages/CodeTracking/src/CodeTracking.jl")
 include("../../../packages/CoverageTools/src/CoverageTools.jl")
 include("../../../packages/IOCapture/src/IOCapture.jl")
+include("../../../packages/CancellationTokens/src/CancellationTokens.jl")
 
 module JSONRPC
+import ..CancellationTokens
 import ..JSON
 import UUIDs
 include("../../../packages/JSONRPC/src/packagedef.jl")
