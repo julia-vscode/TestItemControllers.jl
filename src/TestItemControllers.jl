@@ -101,8 +101,8 @@ function append_output_notification_handler(params::TestItemServerProtocol.Appen
     put!(test_process.parent_channel, (source=:testprocess, msg=(event=:append_output, testitemid=params.testItemId, testrunid=params.testRunId, output=params.output)))
 end
 
-function finished_batch_notification_handler(params::String, test_process)
-    put!(test_process.parent_channel, (source=:testprocess, msg=(event=:finished_batch, testrunid=params, test_process_id = test_process.id)))
+function finished_batch_notification_handler(params::Vector{String}, test_process)
+    put!(test_process.parent_channel, (source=:testprocess, msg=(event=:finished_batch, testrunid=params[1], test_process_id = test_process.id)))
 end
 
 JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
@@ -286,7 +286,7 @@ function start(tp::TestProcess, controller)
                     JSONRPC.send(
                         tp.endpoint,
                         TestItemServerProtocol.testserver_start_test_run_request_type,
-                        tp.test_run_id
+                        [tp.test_run_id]
                     )
 
                     JSONRPC.send(
@@ -323,7 +323,7 @@ function start(tp::TestProcess, controller)
                         JSONRPC.send(
                             tp.endpoint,
                             TestItemServerProtocol.testserver_start_test_run_request_type,
-                            tp.test_run_id
+                            [tp.test_run_id]
                         )
 
                         res = JSONRPC.send(tp.endpoint, TestItemServerProtocol.testserver_revise_request_type, nothing)
@@ -833,7 +833,7 @@ function Base.run(controller::JSONRPCTestItemController)
                         deleteat!(procs, ind)
                     end
                 end
-                JSONRPC.send(controller.endpoint, TestItemControllerProtocol.notificationTypeTestProcessTerminated, msg.msg.id)
+                JSONRPC.send(controller.endpoint, TestItemControllerProtocol.notificationTypeTestProcessTerminated, (;id=msg.msg.id))
             elseif msg.msg.event == :finished_batch
                 # First we find the test process instance and test env
                 test_run = controller.testruns[msg.msg.testrunid]
@@ -870,7 +870,7 @@ function Base.run(controller::JSONRPCTestItemController)
                     JSONRPC.send(
                         test_process.endpoint,
                         TestItemServerProtocol.testserver_end_test_run_requst_type,
-                        test_process.test_run_id
+                        [test_process.test_run_id]
                     )
 
                     test_process.test_run_id = nothing

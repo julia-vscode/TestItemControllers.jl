@@ -35,7 +35,6 @@ mutable struct TestProcessState{ERR_HANDLER<:Function}
 end
 
 
-const conn_endpoint = Ref{Union{Nothing,JSONRPC.JSONRPCEndpoint}}(nothing)
 const DEBUG_SESSION = Ref{Channel{DebugAdapter.DebugSession}}()
 
 function __init__()
@@ -479,7 +478,7 @@ function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItems
         JSONRPC.send(
             state.endpoint,
             TestItemServerProtocol.finished_batch_notification_type,
-            state.testrun_id
+            [state.testrun_id]
         )
     catch err
         bt = catch_backtrace()
@@ -615,11 +614,11 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
     )
 end
 
-function start_test_run_request(params::String, state::TestProcessState, token)
+function start_test_run_request(params::Vector{String}, state::TestProcessState, token)
     state.testrun_id === nothing || error("Invalid state")
     state.is_batch_running == false || error("Invalid state")
 
-    state.testrun_id = params
+    state.testrun_id = params[1]
 
     nothing
 end
@@ -677,8 +676,8 @@ function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRe
     return nothing
 end
 
-function end_test_run_request(params::String, state::TestProcessState, token)
-    state.testrun_id == params || error("Invalid test process state")
+function end_test_run_request(params::Vector{String}, state::TestProcessState, token)
+    state.testrun_id == params[1] || error("Invalid test process state")
     state.is_batch_running == false || error("Invalid state")
 
     empty!(state.stolen_test_items)
@@ -705,16 +704,16 @@ function serve(pipename, debug_pipename, error_handler=nothing)
 
     conn = Sockets.connect(pipename)
 
-    conn_endpoint[] = JSONRPC.JSONRPCEndpoint(conn, conn)
+    endpoint = JSONRPC.JSONRPCEndpoint(conn, conn)
 
-    run(conn_endpoint[])
+    run(endpoint)
 
-    state = TestProcessState(error_handler)
+    state = TestProcessState(endpoint, error_handler)
 
     while true
-        msg = JSONRPC.get_next_message(conn_endpoint[])
+        msg = JSONRPC.get_next_message(endpoint)
 
-        dispatch_msg(conn_endpoint[], msg, state)
+        dispatch_msg(endpoint, msg, state)
     end
 end
 

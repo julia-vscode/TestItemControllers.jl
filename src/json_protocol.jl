@@ -132,7 +132,7 @@ end
 
 const notificationTypeTestProcessCreated = NotificationType("testProcessCreated", TestProcessCreatedParams)
 
-const notificationTypeTestProcessTerminated = NotificationType("testProcessTerminated", String)
+const notificationTypeTestProcessTerminated = NotificationType("testProcessTerminated", @NamedTuple{id::String})
 
 @dict_readable struct TestProcessStatusChangedParams
     id::String

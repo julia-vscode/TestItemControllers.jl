@@ -133,12 +133,12 @@ end
 
 # Messages from the controller to the test process
 const testserver_revise_request_type = JSONRPC.RequestType("testserver/revise", Nothing, String)
-const testserver_start_test_run_request_type = JSONRPC.RequestType("testserver/startTestRun", String, Nothing)
+const testserver_start_test_run_request_type = JSONRPC.RequestType("testserver/startTestRun", Vector{String}, Nothing)
 const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, Nothing)
 const testserver_set_test_setups_request_type = JSONRPC.RequestType("testserver/SetTestSetups", SetTestSetupsRequestParams, Nothing)
 const testserver_run_testitems_batch_request_type = JSONRPC.RequestType("testserver/runTestItems", RunTestItemsRequestParams, Nothing)
 const testserver_steal_testitems_request_type = JSONRPC.RequestType("testserver/stealTestItems", StealTestItemsRequestParams, Nothing)
-const testserver_end_test_run_requst_type = JSONRPC.RequestType("testserver/endTestRun", String, Nothing)
+const testserver_end_test_run_requst_type = JSONRPC.RequestType("testserver/endTestRun", Vector{String}, Nothing)
 
 # Messages from the test process to the controller
 const started_notification_type = JSONRPC.NotificationType("started", StartedParams)
@@ -147,6 +147,6 @@ const errored_notification_type = JSONRPC.NotificationType("errored", ErroredPar
 const failed_notification_type = JSONRPC.NotificationType("failed", FailedParams)
 const skipped_stolen_notification_type = JSONRPC.NotificationType("skippedStolen", SkippedStolenParams)
 const append_output_notification_type = JSONRPC.NotificationType("appendOutput", AppendOutputParams)
-const finished_batch_notification_type = JSONRPC.NotificationType("finishedBatch", String)
+const finished_batch_notification_type = JSONRPC.NotificationType("finishedBatch", Vector{String})
 
 end
