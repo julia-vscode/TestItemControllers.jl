@@ -33,11 +33,11 @@ Base.hash(x::TestEnvironment, h::UInt) = hash(x.env, hash(x.mode, hash(x.juliaNu
 Base.:(==)(a::TestEnvironment, b::TestEnvironment) = a.project_uri == b.project_uri && a.package_uri == b.package_uri && a.package_name == b.package_name && a.juliaCmd == b.juliaCmd && a.juliaArgs == b.juliaArgs && a.juliaNumThreads == b.juliaNumThreads && a.mode == b.mode && a.env == b.env
 Base.isequal(a::TestEnvironment, b::TestEnvironment) = isequal(a.project_uri, b.project_uri) && isequal(a.package_uri, b.package_uri) && isequal(a.package_name, b.package_name) && isequal(a.juliaCmd, b.juliaCmd) && isequal(a.juliaArgs, b.juliaArgs) && isequal(a.juliaNumThreads, b.juliaNumThreads) && isequal(a.mode, b.mode) && isequal(a.env, b.env)
 
-function started_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.StartedParams, test_process)
+function started_notification_handler(params::TestItemServerProtocol.StartedParams, test_process)
     put!(test_process.parent_channel, (source=:testprocess, msg=(event=:started, testitemid=params.testItemId, testrunid=params.testRunId)))
 end
 
-function passed_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.PassedParams, test_process)
+function passed_notification_handler(params::TestItemServerProtocol.PassedParams, test_process)
     idx = findfirst(i->i.id == params.testItemId, test_process.testitems_to_run)
     if idx !== nothing
         deleteat!(test_process.testitems_to_run, idx)
@@ -53,7 +53,7 @@ function passed_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::
     end
 end
 
-function failed_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.FailedParams, test_process)
+function failed_notification_handler(params::TestItemServerProtocol.FailedParams, test_process)
     idx = findfirst(i->i.id == params.testItemId, test_process.testitems_to_run)
     if idx !== nothing
         deleteat!(test_process.testitems_to_run, idx)
@@ -70,7 +70,7 @@ function failed_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::
 
 end
 
-function errored_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.ErroredParams, test_process)
+function errored_notification_handler(params::TestItemServerProtocol.ErroredParams, test_process)
     idx = findfirst(i->i.id == params.testItemId, test_process.testitems_to_run)
     if idx !== nothing
         deleteat!(test_process.testitems_to_run, idx)
@@ -86,7 +86,7 @@ function errored_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params:
     end
 end
 
-function skipped_stolen_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.SkippedStolenParams, test_process)
+function skipped_stolen_notification_handler(params::TestItemServerProtocol.SkippedStolenParams, test_process)
     idx = findfirst(i->i.id == params.testItemId, test_process.stolen_testitems)
     if idx !== nothing
         deleteat!(test_process.stolen_testitems, idx)
@@ -95,11 +95,11 @@ function skipped_stolen_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, 
     end
 end
 
-function append_output_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.AppendOutputParams, test_process)
+function append_output_notification_handler(params::TestItemServerProtocol.AppendOutputParams, test_process)
     put!(test_process.parent_channel, (source=:testprocess, msg=(event=:append_output, testitemid=params.testItemId, testrunid=params.testRunId, output=params.output)))
 end
 
-function finished_batch_notification_handler(endpoint::JSONRPC.JSONRPCEndpoint, params::String, test_process)
+function finished_batch_notification_handler(params::String, test_process)
     put!(test_process.parent_channel, (source=:testprocess, msg=(event=:finished_batch, testrunid=params, test_process_id = test_process.id)))
 end
 
@@ -492,8 +492,9 @@ end
     return [X[1+c*k:(k == n-1 ? end : c*k+c)] for k = 0:n-1]
 end
 
-function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemControllerProtocol.CreateTestRunParams, controller::JSONRPCTestItemController)
+function create_testrun_request(params::TestItemControllerProtocol.CreateTestRunParams, controller::JSONRPCTestItemController, token)
     @info "Creating new test run"
+    endpoint = controller.endpoint
 
     valid_test_items = [i for i in params.testItems if i.packageName !== missing && i.packageUri !== missing]
     test_items_without_package = [i for i in params.testItems if i.packageName === missing || i.packageUri === missing]
@@ -688,7 +689,7 @@ function create_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
     nothing
 end
 
-function cancel_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemControllerProtocol.CancelTestRunParams, controller::JSONRPCTestItemController)
+function cancel_testrun_request(params::TestItemControllerProtocol.CancelTestRunParams, controller::JSONRPCTestItemController, token)
     if controller.testruns[params.testRunId].running
         controller.testruns[params.testRunId].running = false
         for v in values(controller.testprocesses)
@@ -698,11 +699,11 @@ function cancel_testrun_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestI
                 end
             end
         end
-        JSONRPC.send_notification(endpoint, "testRunFinished", (;testRunId=params.testRunId))
+        JSONRPC.send_notification(controller.endpoint, "testRunFinished", (;testRunId=params.testRunId))
     end
 end
 
-function terminate_test_process_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemControllerProtocol.TerminateTestProcessParams, controller::JSONRPCTestItemController)
+function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, controller::JSONRPCTestItemController, token)
     for v in values(controller.testprocesses)
         for p in v
             if p.id == params.testProcessId

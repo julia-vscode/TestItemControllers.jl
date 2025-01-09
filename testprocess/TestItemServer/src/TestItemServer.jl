@@ -21,6 +21,7 @@ mutable struct Testsetup
 end
 
 mutable struct TestProcessState{ERR_HANDLER<:Function}
+    endpoint::JSONRPC.JSONRPCEndpoint
     err_handler::Union{Nothing,ERR_HANDLER}
 
     testrun_id::Union{Nothing,String}
@@ -28,8 +29,8 @@ mutable struct TestProcessState{ERR_HANDLER<:Function}
     is_batch_running::Bool
     stolen_test_items::Set{String}
 
-    function TestProcessState(err_handler::ERR_HANDLER = nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
-        return new{ERR_HANDLER}(err_handler, nothing, Dict{Tuple{String,Symbol},Testsetup}(), false, Set{String}())
+    function TestProcessState(endpoint::JSONRPC.JSONRPCEndpoint, err_handler::ERR_HANDLER = nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
+        return new{ERR_HANDLER}(endpoint, err_handler, nothing, Dict{Tuple{String,Symbol},Testsetup}(), false, Set{String}())
     end
 end
 
@@ -55,7 +56,7 @@ function withpath(f, path)
     end
 end
 
-function revise_request(endpoint::JSONRPC.JSONRPCEndpoint, params::Nothing, state::TestProcessState)
+function revise_request(::Nothing, state::TestProcessState, token)
     state.testrun_id !== nothing || error("Invalid state")
     state.is_batch_running == false || error("Invalid state")
 
@@ -428,7 +429,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, test
     end
 end
 
-function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.RunTestItemsRequestParams, state::TestProcessState)
+function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItemsRequestParams, state::TestProcessState, token)
     state.testrun_id == params.testRunId || error("Invalid test process state")
     state.is_batch_running == false || error("Invalid state")
 
@@ -440,7 +441,7 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
                 delete!(state.stolen_test_items, i.id)
 
                 JSONRPC.send(
-                    endpoint,
+                    state.endpoint,
                     TestItemServerProtocol.skipped_stolen_notification_type,
                     TestItemServerProtocol.SkippedStolenParams(
                         testRunId = params.testRunId,
@@ -450,11 +451,11 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
             else
 
                 c = IOCapture.capture(passthrough=true) do
-                    run_testitem(endpoint, i, params.testRunId, params.mode, coalesce(params.coverageRootUris, nothing), state)
+                    run_testitem(state.endpoint, i, params.testRunId, params.mode, coalesce(params.coverageRootUris, nothing), state)
                 end
 
                 JSONRPC.send(
-                    endpoint,
+                    state.endpoint,
                     TestItemServerProtocol.append_output_notification_type,
                     TestItemServerProtocol.AppendOutputParams(
                         testRunId = params.testRunId,
@@ -464,7 +465,7 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
                 )
 
                 JSONRPC.send(
-                    endpoint,
+                    state.endpoint,
                     c.value[1],
                     c.value[2]
                 )
@@ -476,7 +477,7 @@ function run_testitems_batch_request(endpoint::JSONRPC.JSONRPCEndpoint, params::
         state.is_batch_running = false
 
         JSONRPC.send(
-            endpoint,
+            state.endpoint,
             TestItemServerProtocol.finished_batch_notification_type,
             state.testrun_id
         )
@@ -578,7 +579,7 @@ function get_debug_session_if_present()
 end
 
 
-function activate_env_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState)
+function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token)
     state.testrun_id == params.testRunId || error("Invalid test process state")
     state.is_batch_running == false || error("Invalid state")
 
@@ -604,7 +605,7 @@ function activate_env_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestIte
     end
 
     JSONRPC.send(
-        endpoint,
+        state.endpoint,
         TestItemServerProtocol.append_output_notification_type,
         TestItemServerProtocol.AppendOutputParams(
             testRunId = params.testRunId,
@@ -614,7 +615,7 @@ function activate_env_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestIte
     )
 end
 
-function start_test_run_request(endpoint::JSONRPC.JSONRPCEndpoint, params::String, state::TestProcessState)
+function start_test_run_request(params::String, state::TestProcessState, token)
     state.testrun_id === nothing || error("Invalid state")
     state.is_batch_running == false || error("Invalid state")
 
@@ -623,7 +624,7 @@ function start_test_run_request(endpoint::JSONRPC.JSONRPCEndpoint, params::Strin
     nothing
 end
 
-function set_test_setups_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.SetTestSetupsRequestParams, state::TestProcessState)
+function set_test_setups_request(params::TestItemServerProtocol.SetTestSetupsRequestParams, state::TestProcessState, token)
     state.testrun_id == params.testRunId || error("Invalid test process state")
     state.is_batch_running == false || error("Invalid state")
 
@@ -661,7 +662,7 @@ function set_test_setups_request(endpoint::JSONRPC.JSONRPCEndpoint, params::Test
     end
 end
 
-function steal_testitems_request(endpoint::JSONRPC.JSONRPCEndpoint, params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState)
+function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState, token)
     state.testrun_id == params.testRunId || error("Invalid test process state")
 
     # If we are no longer running a batch, the steal message came to late, we
@@ -676,7 +677,7 @@ function steal_testitems_request(endpoint::JSONRPC.JSONRPCEndpoint, params::Test
     return nothing
 end
 
-function end_test_run_request(endpoint::JSONRPC.JSONRPCEndpoint, params::String, state::TestProcessState)
+function end_test_run_request(params::String, state::TestProcessState, token)
     state.testrun_id == params || error("Invalid test process state")
     state.is_batch_running == false || error("Invalid state")
 
