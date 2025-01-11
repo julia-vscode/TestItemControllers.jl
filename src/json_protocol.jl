@@ -54,31 +54,23 @@ end
     coverageRootUris::Union{Missing,Vector{String}}
 end
 
-const create_testrun_request_type = RequestType("createTestRun", CreateTestRunParams, Nothing)
-
-@dict_readable struct CancelTestRunParams
-    testRunId::String
+@dict_readable struct FileCoverage <: JSONRPC.Outbound
+    uri::String
+    coverage::Vector{Union{Int,Nothing}}
 end
 
-const cancel_testrun_request_type = RequestType("cancelTestRun", CancelTestRunParams, Nothing)
+@dict_readable struct CreateTestRunResponse <: JSONRPC.Outbound
+    status::String
+    coverage::Union{Missing,Vector{FileCoverage}}
+end
+
+const create_testrun_request_type = RequestType("createTestRun", CreateTestRunParams, CreateTestRunResponse)
 
 @dict_readable struct TerminateTestProcessParams
     testProcessId::String
 end
 
 const terminate_test_process_request_type = RequestType("terminateTestProcess", TerminateTestProcessParams, Nothing)
-
-@dict_readable struct FileCoverage <: JSONRPC.Outbound
-    uri::String
-    coverage::Vector{Union{Int,Nothing}}
-end
-
-@dict_readable struct TestRunFinishedParams <: Outbound
-    testRunId::String
-    coverage::Union{Missing,Vector{FileCoverage}}
-end
-
-const notficiationTypeTestRunFinished = NotificationType("testRunFinished", TestRunFinishedParams)
 
 @dict_readable struct TestItemStartedParams <: Outbound
     testRunId::String
@@ -141,6 +133,13 @@ end
 
 const notificationTypeTestProcessStatusChanged = NotificationType("testProcessStatusChanged", TestProcessStatusChangedParams)
 
-const notificationTypeLaunchDebuggers = NotificationType("launchDebuggers", @NamedTuple{debugPipeNames::Vector{String}, testRunId::String})
+@dict_readable struct TestProcessOutputParams
+    id::String
+    output::String
+end
+
+const notificationTypeTestProcessOutput = NotificationType("testProcessOutput", TestProcessOutputParams)
+
+const notificationTypeLaunchDebugger = NotificationType("launchDebugger", @NamedTuple{debugPipeName::String, testRunId::String})
 
 end
