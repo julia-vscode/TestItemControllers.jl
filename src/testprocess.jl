@@ -311,18 +311,21 @@ function create_testprocess(
                     error("Unknown message")
                 end
             elseif msg.event == :append_output
-                put!(
-                    testrun_channel,
-                    (
-                        source=:testprocess,
-                        msg=(
-                            event=:append_output,
-                            testitemid=msg.testitem_id,
-                            # testrunid=params.testRunId,
-                            output=msg.output
+                # TODO Remove this and understand the race situation better
+                if testrun_channel !== nothing
+                    put!(
+                        testrun_channel,
+                        (
+                            source=:testprocess,
+                            msg=(
+                                event=:append_output,
+                                testitemid=msg.testitem_id,
+                                # testrunid=params.testRunId,
+                                output=msg.output
+                            )
                         )
                     )
-                )
+                end
             end
         end
     catch err

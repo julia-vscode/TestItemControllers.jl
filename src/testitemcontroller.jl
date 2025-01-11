@@ -78,7 +78,7 @@ function Base.run(
 
                 existing_idle_procs = filter(i->i.idle, testprocesses)
 
-                @info "We need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
+                @debug "We need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
 
                 # Grab existing procs
                 for p in Iterators.take(existing_idle_procs, v)
@@ -102,7 +102,7 @@ function Base.run(
                 identified_precompile_proc = false
 
                 while length(our_procs[k]) < v
-                    @info "Launching new test process"
+                    @debug "Launching new test process"
 
                     # The first process we create will be the precompile proc if we need one
                     this_is_the_precompile_proc = precompile_required && !identified_precompile_proc
@@ -182,7 +182,7 @@ function execute_testrun(
     attach_debugger_callback,
     token)
 
-    @info "Creating new test run"
+    @debug "Creating new test run"
 
     testrun_msg_queue = Channel{Any}(Inf)
     our_procs = nothing
@@ -406,7 +406,7 @@ function execute_testrun(
                     end
 
                     if test_process_to_steal_from === nothing
-                        @info "Nothing to steal for $(test_process.id), returning to pool ($(msg.msg.event): $(msg.msg.testitemid))."
+                        @debug "Nothing to steal for $(test_process.id), returning to pool ($(msg.msg.event): $(msg.msg.testitemid))."
                         put!(controller.msg_channel, (event=:return_to_pool, testprocess=test_process))
                     else
 
@@ -418,7 +418,7 @@ function execute_testrun(
 
                         testitem_ids_to_steal = testitem_ids_from_which_we_steal[steal_range]
 
-                        @info "Stealing $(length(testitem_ids_to_steal)) test items from $(test_process_to_steal_from.id) for $(test_process.id)."
+                        @debug "Stealing $(length(testitem_ids_to_steal)) test items from $(test_process_to_steal_from.id) for $(test_process.id)."
 
                         deleteat!(testitem_ids_from_which_we_steal, steal_range)
 

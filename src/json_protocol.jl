@@ -11,7 +11,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     packageName::Union{Missing,String}
     packageUri::Union{Missing,String}
     projectUri::Union{Missing,String}
-    envContentHash::Union{Missing,Int}
+    envContentHash::Union{Missing,UInt64}
     juliaCmd::String
     juliaArgs::Vector{String}
     juliaNumThreads::String

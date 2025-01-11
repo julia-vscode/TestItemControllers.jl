@@ -20,9 +20,9 @@ mutable struct Testsetup
     evaled::Bool
 end
 
-mutable struct TestProcessState{ERR_HANDLER<:Function}
+mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
     endpoint::JSONRPC.JSONRPCEndpoint
-    err_handler::Union{Nothing,ERR_HANDLER}
+    err_handler::ERR_HANDLER
 
     test_setups::Dict{Tuple{String,Symbol},Testsetup}
     mode::String
