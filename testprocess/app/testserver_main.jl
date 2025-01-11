@@ -3,9 +3,17 @@
 import Pkg
 version_specific_env_path = joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)")
 if isdir(version_specific_env_path)
-    Pkg.activate(version_specific_env_path, io=devnull)
+    @static if VERSION >= v"1.6"
+        Pkg.activate(version_specific_env_path, io=devnull)
+    else
+        Pkg.activate(version_specific_env_path)
+    end
 else
-    Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"), io=devnull)
+    @static if VERSION >= v"1.6"
+        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"), io=devnull)
+    else
+        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"))
+    end
 end
 
 let

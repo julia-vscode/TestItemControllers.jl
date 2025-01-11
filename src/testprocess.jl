@@ -376,8 +376,8 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
     jl_process = open(
         pipeline(
             Cmd(`$(env.juliaCmd) $(env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
-            stdout = pipe_out,
-            stderr = pipe_out
+            # stdout = pipe_out,
+            # stderr = pipe_out
         )
     )
 

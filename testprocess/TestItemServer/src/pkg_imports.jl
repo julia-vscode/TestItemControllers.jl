@@ -53,8 +53,10 @@ module Revise
         linetable, codelocs, LineTypes, isassign, isidentical
     using ..LoweredCodeUtils: next_or_nothing!, trackedheads, callee_matches
 
-    @static if VERSION >= v"1.6.0"
+    @static if VERSION >= v"1.10.0"
         include("../../../packages/Revise/src/packagedef.jl")
+    elseif VERSION >= v"1.6.0"
+        include("../../../packages-old/v1.9/Revise/src/packagedef.jl")
     else
         include("../../../packages-old/v1.5/Revise/src/packagedef.jl")
     end
