@@ -167,13 +167,51 @@ function makechunks(X::AbstractVector, n::Integer)
     return [X[1+c*k:(k == n-1 ? end : c*k+c)] for k = 0:n-1]
 end
 
+struct TestProfile
+    id::String
+    label::String
+    julia_cmd::String
+    julia_args::Vector{String}
+    julia_num_threads::String
+    julia_env::Dict{String,Union{String,Nothing}}
+    max_process_count::Int
+    mode::String
+    coverage_root_uris::Union{Nothing,Vector{String}}
+end
+
+struct TestItemDetail
+    id::String
+    uri::String
+    label::String
+    package_name::Union{Nothing,String}
+    package_uri::Union{Nothing,String}
+    project_uri::Union{Nothing,String}
+    env_content_hash::Union{Nothing,UInt64}
+    option_default_imports::Bool
+    test_setups::Vector{String}
+    line::Int
+    column::Int
+    code::String
+    code_line::Int
+    code_column::Int
+end
+
+struct TestSetupDetail
+    package_uri::Union{Nothing,String}
+    name::String
+    kind::String
+    uri::String
+    line::Int
+    column::Int
+    code::String
+end
+
 function execute_testrun(
     controller::TestItemController,
     testrun_id::String,
-    max_procs::Int,
-    test_items::Vector{TestItemControllerProtocol.TestItem},
-    test_setups::Vector{TestItemControllerProtocol.TestSetupDetail},
-    coverage_root_uris::Union{Missing,Vector{String}},
+    profiles::Vector{TestProfile},
+    test_items::Vector{TestItemDetail},
+    test_setups::Vector{TestSetupDetail},
     testitem_started_callback,
     testitem_passed_callback,
     testitem_failed_callback,
@@ -182,13 +220,15 @@ function execute_testrun(
     attach_debugger_callback,
     token)
 
+    @assert length(profiles) == 1 "Currently one must pass one test profile"
+
     @debug "Creating new test run"
 
     testrun_msg_queue = Channel{Any}(Inf)
     our_procs = nothing
 
-    valid_test_items = Dict(i.id => i for i in test_items if i.packageName !== missing && i.packageUri !== missing)
-    test_items_without_package = [i for i in test_items if i.packageName === missing || i.packageUri === missing]
+    valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
+    test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
 
     stolen_testitem_ids_by_proc_id = Dict{String,Vector{String}}()
 
@@ -198,14 +238,14 @@ function execute_testrun(
 
     for i in values(valid_test_items)
         te = TestEnvironment(
-            coalesce(i.projectUri, nothing),
-            i.packageUri,
-            i.packageName,
-            i.juliaCmd,
-            i.juliaArgs,
-            i.juliaNumThreads,
-            i.mode,
-            i.juliaEnv
+            i.project_uri,
+            i.package_uri,
+            i.package_name,
+            profiles[1].julia_cmd,
+            profiles[1].julia_args,
+            profiles[1].julia_num_threads,
+            profiles[1].mode,
+            profiles[1].julia_env
         )
 
         testitems = get!(testitem_ids_by_env, te) do
@@ -215,11 +255,11 @@ function execute_testrun(
         push!(testitems, i.id)
 
         if haskey(env_content_hash_by_env, te)
-            if env_content_hash_by_env[te] != i.envContentHash
+            if env_content_hash_by_env[te] != i.env_content_hash
                 error("This is invalid.")
             end
         else
-            env_content_hash_by_env[te] = i.envContentHash
+            env_content_hash_by_env[te] = i.env_content_hash
         end
     end
 
@@ -228,7 +268,7 @@ function execute_testrun(
     for (k,v) in pairs(testitem_ids_by_env)
         as_share = length(v)/length(valid_test_items)
 
-        n_procs = min(floor(Int, max_procs * as_share), length(valid_test_items))
+        n_procs = min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items))
 
         chunks =  makechunks(v, n_procs)
 
@@ -263,7 +303,7 @@ function execute_testrun(
             env_content_hash_by_env = env_content_hash_by_env,
             test_setups = [
                 TestItemServerProtocol.TestsetupDetails(
-                    packageUri = i.packageUri,
+                    packageUri = something(i.package_uri, missing),
                     name = i.name,
                     kind = i.kind,
                     uri = i.uri,
@@ -271,7 +311,7 @@ function execute_testrun(
                     column = i.column,
                     code = i.code
                 ) for i in test_setups],
-            coverage_root_uris = coalesce(coverage_root_uris, nothing),
+            coverage_root_uris = profiles[1].coverage_root_uris,
             testrun_msg_queue = testrun_msg_queue
         )
     )

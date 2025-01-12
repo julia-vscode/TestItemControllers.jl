@@ -1,4 +1,4 @@
-@info "Julia test item process launching"
+@info "Julia test item process precompiling"
 
 import Pkg
 version_specific_env_path = joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)")
@@ -27,11 +27,6 @@ let
         end
 
         using TestItemServer
-
-        TestItemServer.serve(
-            ARGS[1],
-            ARGS[2],
-            has_error_handler ? (err, bt) -> global_err_handler(err, bt, Base.ARGS[4], "Test Process") : nothing)
     catch err
         bt = catch_backtrace()
         if has_error_handler

@@ -1,7 +1,11 @@
 include("../../../packages/TestEnv/src/TestEnv.jl")
 include("../../../packages/URIParser/src/URIParser.jl")
 include("../../../packages/JSON/src/JSON.jl")
-include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
+if VERSION >= v"1.6.0"
+    include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
+else
+    include("../../../packages-old/v1.5/OrderedCollections/src/OrderedCollections.jl")
+end
 include("../../../packages/CodeTracking/src/CodeTracking.jl")
 include("../../../packages/CoverageTools/src/CoverageTools.jl")
 include("../../../packages/IOCapture/src/IOCapture.jl")
