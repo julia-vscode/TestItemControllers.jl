@@ -6,7 +6,7 @@ struct TestEnvironment
     juliaArgs::Vector{String}
     juliaNumThreads::String
     mode::String
-    env::Dict{String,String}
+    env::Dict{String,Union{String,Nothing}}
 end
 
 Base.hash(x::TestEnvironment, h::UInt) = hash(x.env, hash(x.mode, hash(x.juliaNumThreads, hash(x.juliaArgs, hash(x.juliaCmd, hash(x.package_name, hash(x.package_uri, hash(x.project_uri, hash(:TestEnvironment, h)))))))))
