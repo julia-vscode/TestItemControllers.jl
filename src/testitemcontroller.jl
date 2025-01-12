@@ -107,11 +107,10 @@ function Base.run(
                     put!(p.msg_channel, (event=:revise, test_env_content_hash=msg.env_content_hash_by_env[k]))
                 end
 
-                # Now comes a horrible hack for old Julia versions: pre Julia 1.X parallel precompile
+                # Now comes a horrible hack for old Julia versions: pre Julia 1.10 parallel precompile
                 # crashes Julia. If we are on one of these old Julia verions, we need to precompile
                 # the test process itself once before we do anything else. We do this only once per
                 # Julia version per session
-                # TODO Confirm that the version where this problem was fixed is indeed 1.6
                 if !(
                     (
                         julia_cmd=k.juliaCmd,
@@ -136,7 +135,7 @@ function Base.run(
                     julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
                     julia_version = VersionNumber(julia_version_as_string)
 
-                    if julia_version <= v"1.6.0"
+                    if julia_version <= v"1.10.0"
                         testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
 
                         asdf = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
