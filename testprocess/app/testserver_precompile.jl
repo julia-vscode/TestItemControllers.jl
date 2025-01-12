@@ -21,8 +21,8 @@ let
 
     try
 
-        if length(ARGS) > 2
-            include(ARGS[3])
+        if length(ARGS) > 0
+            include(ARGS[1])
             has_error_handler = true
         end
 
@@ -30,7 +30,7 @@ let
     catch err
         bt = catch_backtrace()
         if has_error_handler
-            global_err_handler(err, bt, Base.ARGS[4], "Test Process")
+            global_err_handler(err, bt, Base.ARGS[2], "Test Process")
         else
             Base.display_error(err, bt)
         end

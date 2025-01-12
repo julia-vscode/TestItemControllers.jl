@@ -12,6 +12,14 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
     msg_channel::Channel
 
     testprocesses::Dict{TestEnvironment,Vector{TestProcess}}
+    testprocess_precompile_not_required::Set{
+        @NamedTuple{
+            julia_cmd::String,
+            julia_args::Vector{String},
+            env::Dict{String,Union{String,Nothing}},
+            coverage::Bool
+        }
+    }
 
     precompiled_envs::Set{TestEnvironment}
 
@@ -29,6 +37,7 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
             err_handler,
             Channel(Inf),
             Dict{TestEnvironment,Vector{TestProcess}}(),
+            Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
             Set{TestEnvironment}(),
             Dict{String,Vector{CoverageTools.FileCoverage}}(),
             error_handler_file,
@@ -96,6 +105,56 @@ function Base.run(
 
                     put!(p.msg_channel, (event=:revise, test_env_content_hash=msg.env_content_hash_by_env[k]))
                 end
+
+                # Now comes a horrible hack for old Julia versions: pre Julia 1.X parallel precompile
+                # crashes Julia. If we are on one of these old Julia verions, we need to precompile
+                # the test process itself once before we do anything else. We do this only once per
+                # Julia version per session
+                # TODO Confirm that the version where this problem was fixed is indeed 1.6
+                if !(
+                    (
+                        julia_cmd=k.juliaCmd,
+                        julia_args=k.juliaArgs,
+                        env=k.env,
+                        coverage=k.mode == "Coverage"
+                    ) in controller.testprocess_precompile_not_required)
+
+                    @info "New env, lets figure out whether we need to precompile the test environment"
+                    coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
+                    
+                    jlEnv = copy(ENV)
+                    for (k,v) in pairs(k.env)
+                        if v!==nothing
+                            jlEnv[k] = v
+                        elseif haskey(jlEnv, k)
+                            delete!(jlEnv, k)
+                        end
+                    end
+                    
+                    julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
+                    julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
+                    julia_version = VersionNumber(julia_version_as_string)
+
+                    if julia_version <= v"1.6.0"
+                        testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
+
+                        asdf = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
+
+                        @info "Precompile of test server" asdf
+
+                        push!(controller.testprocess_precompile_not_required, (
+                            julia_cmd=k.juliaCmd,
+                            julia_args=k.juliaArgs,
+                            env=k.env,
+                            coverage=k.mode == "Coverage"
+                        ))
+                    else
+                        @info "Julia version is new enough"
+                    end
+                else
+                    @info "Precompile check has been done already"
+                end
+
 
                 precompile_required = !(k in controller.precompiled_envs)
 
