@@ -4,7 +4,19 @@ import ..JSONRPC
 
 using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 
-@dict_readable struct TestItem
+@dict_readable struct TestProfile
+    id::String
+    label::String
+    juliaCmd::String
+    juliaArgs::Vector{String}
+    juliaNumThreads::String
+    juliaEnv::Dict{String,Union{String,Nothing}}
+    maxProcessCount::Int
+    mode::String
+    coverageRootUris::Union{Missing,Vector{String}}
+end
+
+@dict_readable struct TestItemDetail
     id::String
     uri::String
     label::String
@@ -12,10 +24,6 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     packageUri::Union{Missing,String}
     projectUri::Union{Missing,String}
     envContentHash::Union{Missing,UInt64}
-    juliaCmd::String
-    juliaArgs::Vector{String}
-    juliaNumThreads::String
-    juliaEnv::Dict{String,Union{String,Nothing}}
     useDefaultUsings::Bool
     testSetups::Vector{String}
     line::Int
@@ -23,8 +31,6 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     code::String
     codeLine::Int
     codeColumn::Int
-    mode::String
-    # cover
 end
 
 @dict_readable struct TestSetupDetail
@@ -37,21 +43,11 @@ end
     code::String
 end
 
-@dict_readable struct TestMessage
-    message::String
-    expectedOutput::Union{Missing,String}
-    actualOutput::Union{Missing,String}
-    uri::Union{Missing,String}
-    line::Union{Missing,Int}
-    column::Union{Missing,Int}
-end
-
 @dict_readable struct CreateTestRunParams
     testRunId::String
-    maxProcessCount::Int
-    testItems::Vector{TestItem}
+    testProfiles::Vector{TestProfile}
+    testItems::Vector{TestItemDetail}
     testSetups::Vector{TestSetupDetail}
-    coverageRootUris::Union{Missing,Vector{String}}
 end
 
 @dict_readable struct FileCoverage <: JSONRPC.Outbound
@@ -71,6 +67,15 @@ const create_testrun_request_type = RequestType("createTestRun", CreateTestRunPa
 end
 
 const terminate_test_process_request_type = RequestType("terminateTestProcess", TerminateTestProcessParams, Nothing)
+
+@dict_readable struct TestMessage
+    message::String
+    expectedOutput::Union{Missing,String}
+    actualOutput::Union{Missing,String}
+    uri::Union{Missing,String}
+    line::Union{Missing,Int}
+    column::Union{Missing,Int}
+end
 
 @dict_readable struct TestItemStartedParams <: Outbound
     testRunId::String

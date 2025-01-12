@@ -25,10 +25,49 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
     ret =  execute_testrun(
         jr_controller.controller,
         params.testRunId,
-        params.maxProcessCount,
-        params.testItems,
-        params.testSetups,
-        params.coverageRootUris,
+        [
+            TestProfile(
+                i.id,
+                i.label,
+                i.juliaCmd,
+                i.juliaArgs,
+                i.juliaNumThreads,
+                i.juliaEnv,
+                i.maxProcessCount,
+                i.mode,
+                coalesce(i.coverageRootUris,nothing)
+            ) for i in params.testProfiles
+        ],
+        [
+            TestItemDetail(
+                i.id,
+                i.uri,
+                i.label,
+                coalesce(i.packageName, nothing),
+                coalesce(i.packageUri, nothing),
+                coalesce(i.projectUri, nothing),
+                coalesce(i.envContentHash, nothing),
+                i.useDefaultUsings,
+                i.testSetups,
+                i.line,
+                i.column,
+                i.code,
+                i.codeLine,
+                i.codeColumn
+            )
+            for i in params.testItems
+        ],
+        [
+            TestSetupDetail(
+                coalesce(i.packageUri, nothing),
+                i.name,
+                i.kind,
+                i.uri,
+                i.line,
+                i.column,
+                i.code
+            ) for i in params.testSetups
+        ],
         # testitem_started_callback,
         (testrun_id, testitem_id) -> JSONRPC.send(
             jr_controller.endpoint,
