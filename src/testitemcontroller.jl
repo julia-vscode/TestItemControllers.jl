@@ -234,7 +234,7 @@ function execute_testrun(
 
     testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
 
-    env_content_hash_by_env = Dict{TestEnvironment,Int}()
+    env_content_hash_by_env = Dict{TestEnvironment,UInt64}()
 
     for i in values(valid_test_items)
         te = TestEnvironment(
