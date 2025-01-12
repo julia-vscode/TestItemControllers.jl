@@ -373,11 +373,12 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
+    @debug "Launch proc"
     jl_process = open(
         pipeline(
             Cmd(`$(env.juliaCmd) $(env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
-            stdout = pipe_out,
-            stderr = pipe_out
+            # stdout = pipe_out,
+            # stderr = pipe_out
         )
     )
 
@@ -404,7 +405,9 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
         end
     end
 
+    @debug "Waiting for connection from test process"
     socket = Sockets.accept(server)
+    @debug "Connection established"
 
     endpoint = JSONRPC.JSONRPCEndpoint(socket, socket)
 
