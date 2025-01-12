@@ -55,6 +55,7 @@ function Base.run(
     )
     while true
         msg = take!(controller.msg_channel)
+        @debug "Controller msg" msg
 
         if msg.event == :test_process_status_changed
             # Inform the user via callback
@@ -379,6 +380,7 @@ function execute_testrun(
 
     while true
         msg = take!(testrun_msg_queue)
+        @debug "Testrun msg" msg
 
         if msg.source==:controller
             if msg.msg.event==:procs_acquired

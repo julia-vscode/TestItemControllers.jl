@@ -79,7 +79,7 @@ function create_testprocess(
 
         while true
             msg = take!(msg_channel)
-            # @info "Test process new message" msg
+            @debug "Test process new message" msg
 
             if msg.event == :start_testrun
                 testrun_channel = msg.testrun_channel
