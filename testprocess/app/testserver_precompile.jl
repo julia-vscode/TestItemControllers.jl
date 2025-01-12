@@ -32,7 +32,7 @@ let
         if has_error_handler
             global_err_handler(err, bt, Base.ARGS[2], "Test Process")
         else
-            Base.display_error(err, bt)
+            rethrow(err)
         end
     end
 end
