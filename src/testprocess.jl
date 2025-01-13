@@ -77,11 +77,24 @@ function create_testprocess(
 
         precompile_done = false
 
+        cs = CancellationTokens.CancellationTokenSource()
+
         while true
             msg = take!(msg_channel)
             @debug "Test process new message" msg
 
-            if msg.event == :start_testrun
+            if msg.event == :shutdown
+                CancellationTokens.cancel(cs)
+                @async try
+                    JSONRPC.send(
+                        endpoint,
+                        TestItemServerProtocol.testserver_shutdown_request_type,
+                        nothing
+                    )
+                catch err
+                    Base.display_error(err, catch_backtrace())
+                end
+            elseif msg.event == :start_testrun
                 testrun_channel = msg.testrun_channel
                 test_setups =msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
@@ -122,7 +135,7 @@ function create_testprocess(
             elseif msg.event == :start
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
-                    start(testprocess_id, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename)
+                    start(testprocess_id, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(cs))
                 catch err
                     Base.display_error(err, catch_backtrace())
                 end
@@ -335,7 +348,7 @@ function create_testprocess(
     return testprocess_id, msg_channel
 end
 
-function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename)
+function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
@@ -416,7 +429,15 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
     put!(testprocess_msg_channel, (event=:testprocess_launched, jl_process=jl_process, endpoint=endpoint))
 
     while true
-        msg = JSONRPC.get_next_message(endpoint)
+        msg = try
+            JSONRPC.get_next_message(endpoint)
+        catch err
+            if CancellationTokens.is_cancellation_requested(token)
+                break
+            else
+                rethrow(err)
+            end
+        end
         # @info "Processing msg from test process" msg
 
         dispatch_testprocess_msg(endpoint, msg, testprocess_msg_channel)

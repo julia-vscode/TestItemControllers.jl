@@ -129,6 +129,7 @@ const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", 
 const configure_testrun_request_type = JSONRPC.RequestType("testserver/ConfigureTestRun", ConfigureTestRunRequestParams, Nothing)
 const testserver_run_testitems_batch_request_type = JSONRPC.RequestType("testserver/runTestItems", RunTestItemsRequestParams, Nothing)
 const testserver_steal_testitems_request_type = JSONRPC.RequestType("testserver/stealTestItems", StealTestItemsRequestParams, Nothing)
+const testserver_shutdown_request_type = JSONRPC.RequestType("testserver/shutdown", Nothing, Nothing)
 
 # Messages from the test process to the controller
 const started_notification_type = JSONRPC.NotificationType("started", StartedParams)

@@ -595,12 +595,17 @@ function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRe
     return nothing
 end
 
+function shutdown_request(::Nothing, state::TestProcessState, token)
+    return nothing
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     TestItemServerProtocol.testserver_revise_request_type => revise_request
     TestItemServerProtocol.testserver_activate_env_request_type => activate_env_request
     TestItemServerProtocol.configure_testrun_request_type => configure_test_run_request
     TestItemServerProtocol.testserver_run_testitems_batch_request_type => run_testitems_batch_request
     TestItemServerProtocol.testserver_steal_testitems_request_type => steal_testitems_request
+    TestItemServerProtocol.testserver_shutdown_request_type => shutdown_request
 end
 
 function runner_loop(state::TestProcessState)
@@ -700,10 +705,15 @@ function serve(pipename, debug_pipename, error_handler=nothing)
     while true
         msg = JSONRPC.get_next_message(endpoint)
 
-        @async try
+        if msg.method == "testserver/shutdown"
             dispatch_msg(endpoint, msg, state)
-        catch err
-            Base.display_error(err, catch_backtrace())
+            break
+        else
+            @async try
+                dispatch_msg(endpoint, msg, state)
+            catch err
+                Base.display_error(err, catch_backtrace())
+            end
         end
     end
 end

@@ -46,6 +46,17 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
     end
 end
 
+function shutdown(controller::TestItemController)
+    for i in Iterators.flatten(values(controller.testprocesses))
+        put!(
+            i.msg_channel,
+            (;
+                event = :shutdown
+            )
+        )
+    end   
+end
+
 function Base.run(
         controller::TestItemController,
         testprocess_created_callback,
