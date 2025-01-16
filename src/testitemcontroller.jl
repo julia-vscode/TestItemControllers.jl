@@ -54,7 +54,7 @@ function shutdown(controller::TestItemController)
                 event = :shutdown
             )
         )
-    end   
+    end
 end
 
 function Base.run(
@@ -78,6 +78,7 @@ function Base.run(
                 ind = findfirst(i->i.id==msg.id, procs)
                 if ind!==nothing
                     deleteat!(procs, ind)
+                    break
                 end
             end
 
@@ -132,7 +133,7 @@ function Base.run(
 
                     @info "New env, lets figure out whether we need to precompile the test environment"
                     coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
-                    
+
                     jlEnv = copy(ENV)
                     for (k,v) in pairs(k.env)
                         if v!==nothing
@@ -141,7 +142,7 @@ function Base.run(
                             delete!(jlEnv, k)
                         end
                     end
-                    
+
                     julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
                     julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
                     julia_version = VersionNumber(julia_version_as_string)
