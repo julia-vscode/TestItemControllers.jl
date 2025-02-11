@@ -407,9 +407,19 @@ function execute_testrun(
             else
                 error("Unknown message")
             end
-        elseif msg.source==:testprocess
+        elseif msg.source == :testprocess
+            # We can run into situations where the :get_procs_for_testrun event has not completed
+            #   but the test proccess has flagged that it is ready. This if check handles making 
+            #   sure that we've prepared the process
             if msg.msg.event == :ready_to_run_testitems
-                put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
+                if haskey(testitem_ids_by_proc, msg.msg.id)
+                    put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
+                # If we haven't populated the process::test_id mapping yet, put the run event back in the queue and yield
+                #   so another task can make progress (e.g. running a sub Julia process to get version info)
+                else
+                    put!(testrun_msg_queue, msg)
+                    yield()
+                end
             elseif msg.msg.event == :attach_debugger
                 attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
             elseif msg.msg.event == :precompile_done
