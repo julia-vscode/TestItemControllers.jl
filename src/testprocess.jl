@@ -79,6 +79,8 @@ function create_testprocess(
 
         cs = CancellationTokens.CancellationTokenSource()
 
+        state = :created
+
         while true
             msg = take!(msg_channel)
             @debug "Test process new message" msg
@@ -95,10 +97,16 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :start_testrun
+                state in (:created, :foo) || error("Invalid state transition")
+                state = :testrun_idle
+
                 testrun_channel = msg.testrun_channel
                 test_setups =msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
             elseif msg.event == :revise
+                state == :testrun_idle || error("Invalid state transition")
+                state = :testrun_revising
+
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Revising"))
 
                 @async try
@@ -127,12 +135,18 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :restart
+                state == :testrun_revising || error("Invalid state transition")
+                state = :testrun_killed_after_revise_fail
+
                 @info "Revise could not handle changes or test env was changed, restarting process"
                 kill(jl_process)
                 jl_process = nothing
                 endpoint = nothing
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :start
+                state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition")
+                state = :testrun_starting
+
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
                     start(testprocess_id, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(cs))
@@ -140,16 +154,23 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :end_testrun
+                state == :testrun_idle || error("Invalid state transition")
+                state = :idle
+
                 testrun_channel = nothing
                 test_setups = nothing
                 coverage_root_uris = nothing
             elseif msg.event == :testprocess_launched
+                state == :testrun_starting || error("Invalid state transition.")
+
+
                 if env.mode == "Debug"
                     put!(testrun_channel, (source=:testprocess, msg=(;event=:attach_debugger, debug_pipe_name=debug_pipe_name)))
                 end
                 jl_process = msg.jl_process
                 endpoint = msg.endpoint
                 if is_precompile_process || precompile_done
+                    state = is_precompile_process ? :testrun_precompiling : :testrun_activating
                     @async try
                         JSONRPC.send(
                             endpoint,
@@ -166,8 +187,13 @@ function create_testprocess(
                     catch err
                         Base.display_error(err, catch_backtrace())
                     end
+                else
+                    state = :testrun_waiting_for_precompile_done
                 end
             elseif msg.event == :precompile_by_other_proc_done
+                state == :testrun_waiting_for_precompile_done || error("Invalid state transition")
+
+
                 precompile_done = true
                 if !is_precompile_process && jl_process !== nothing
                     @async try
@@ -390,8 +416,8 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
     jl_process = open(
         pipeline(
             Cmd(`$(env.juliaCmd) $(env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
-            # stdout = pipe_out,
-            # stderr = pipe_out
+            stdout = pipe_out,
+            stderr = pipe_out
         )
     )
 
