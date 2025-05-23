@@ -124,7 +124,7 @@ const notficiationTypeAppendOutput = NotificationType("appendOutput", AppendOutp
     packageUri::Union{Missing,String}
     projectUri::Union{Missing,String}
     coverage::Bool
-    env::Dict{String,String}
+    env::Dict{String,Union{String, Nothing}}
 end
 
 const notificationTypeTestProcessCreated = NotificationType("testProcessCreated", TestProcessCreatedParams)
