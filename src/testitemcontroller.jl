@@ -11,6 +11,8 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
 
     msg_channel::Channel
 
+    testrun_msg_channels::Dict{String,Channel}
+
     testprocesses::Dict{TestEnvironment,Vector{TestProcess}}
     testprocess_precompile_not_required::Set{
         @NamedTuple{
@@ -36,6 +38,7 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
         return new{ERR_HANDLER}(
             err_handler,
             Channel(Inf),
+            Dict{String,Channel}(),
             Dict{TestEnvironment,Vector{TestProcess}}(),
             Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
             Set{TestEnvironment}(),
@@ -66,7 +69,6 @@ function Base.run(
     )
     while true
         msg = take!(controller.msg_channel)
-        @debug "Controller msg" msg
 
         if msg.event == :test_process_status_changed
             # Inform the user via callback
@@ -243,7 +245,7 @@ struct TestProfile
     label::String
     julia_cmd::String
     julia_args::Vector{String}
-    julia_num_threads::String
+    julia_num_threads::Union{Missing,String}
     julia_env::Dict{String,Union{String,Nothing}}
     max_process_count::Int
     mode::String
@@ -296,6 +298,7 @@ function execute_testrun(
     @info "Creating new test run"
 
     testrun_msg_queue = Channel{Any}(Inf)
+    controller.testrun_msg_channels[testrun_id] = testrun_msg_queue
     our_procs = nothing
 
     valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
@@ -389,6 +392,11 @@ function execute_testrun(
 
     testitem_ids_by_proc = Dict{String,Vector{String}}()
 
+    coverage_results = missing
+
+    processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
+    procs_acquired = false
+
     while true
         msg = take!(testrun_msg_queue)
         @debug "Testrun msg" msg
@@ -404,17 +412,35 @@ function execute_testrun(
                         testitem_ids_by_proc[proc.id] = pop!(testitem_ids_by_env_chunked[k])
                     end
                 end
+
+                procs_acquired = true
+
+                for i in processes_that_are_ready
+                    put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
+                end
+            elseif msg.msg.event==:cancel_test_run
+                for i in Iterators.flatten(values(our_procs))
+                    put!(i.msg_channel, (; event=:cancel_test_run))
+                end
+
+                # TODO What then?
             else
                 error("Unknown message")
             end
         elseif msg.source==:testprocess
             if msg.msg.event == :ready_to_run_testitems
-                put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
+                if procs_acquired
+                    put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
+                else
+                    push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
+                end
             elseif msg.msg.event == :attach_debugger
                 attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
             elseif msg.msg.event == :precompile_done
                 for i in our_procs[msg.msg.env]
-                    put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
+                    if i.id !== msg.msg.testprocess_id
+                        put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
+                    end
                 end
             elseif msg.msg.event == :started
                 testitem_started_callback(
@@ -550,7 +576,7 @@ function execute_testrun(
                 # Are we done with the testrun?
                 # @info "Still $(length(valid_test_items)) test items and $(sum(length.(values(stolen_testitem_ids_by_proc_id)))) stolen items processing."
                 if length(valid_test_items)==0 && sum(length.(values(stolen_testitem_ids_by_proc_id)))==0
-                    coverage_results = missing
+
                     if haskey(controller.coverage, testrun_id)
                         coverage_results = map(CoverageTools.merge_coverage_counts(controller.coverage[testrun_id])) do i
                             TestItemControllerProtocol.FileCoverage(
@@ -560,7 +586,8 @@ function execute_testrun(
                         end
                     end
 
-                    return coverage_results
+                    break
+
                 end
             elseif msg.msg.event == :test_process_terminated
                 for procs in values(controller.testprocesses)
@@ -586,4 +613,8 @@ function execute_testrun(
             error("Unknown source")
         end
     end
+
+    delete!(controller.testrun_msg_channels, testrun_id)
+
+    return coverage_results
 end

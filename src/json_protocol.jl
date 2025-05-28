@@ -9,7 +9,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     label::String
     juliaCmd::String
     juliaArgs::Vector{String}
-    juliaNumThreads::String
+    juliaNumThreads::Union{Missing,String}
     juliaEnv::Dict{String,Union{String,Nothing}}
     maxProcessCount::Int
     mode::String
@@ -61,6 +61,12 @@ end
 end
 
 const create_testrun_request_type = RequestType("createTestRun", CreateTestRunParams, CreateTestRunResponse)
+
+@dict_readable struct CancelTestRunParams
+    testRunId::String
+end
+
+const cancel_testrun_notificationType = NotificationType("cancelTestRun", CancelTestRunParams)
 
 @dict_readable struct TerminateTestProcessParams
     testProcessId::String

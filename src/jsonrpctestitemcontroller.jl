@@ -138,6 +138,21 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
     end
 end
 
+function cancel_testrun_notification(params::TestItemControllerProtocol.CancelTestRunParams, controller::JSONRPCTestItemController, token)
+    ch = get(controller.testrun_msg_channels, params.testRunId, nothing)
+    if ch!==nothing
+        put!(
+            ch,
+            (
+                source=:controller,
+                msg=(;
+                    event=:cancel_test_run,
+                )
+            )
+        )
+    end
+end
+
 function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, controller::JSONRPCTestItemController, token)
     for v in values(controller.testprocesses)
         for p in v
@@ -150,6 +165,7 @@ end
 
 JSONRPC.@message_dispatcher dispatch_msg begin
     TestItemControllerProtocol.create_testrun_request_type => create_testrun_request
+    TestItemControllerProtocol.cancel_testrun_notificationType => cancel_testrun_notification
     TestItemControllerProtocol.terminate_test_process_request_type => terminate_test_process_request
 end
 
@@ -163,6 +179,8 @@ function Base.run(jr_controller::JSONRPCTestItemController)
             @async try
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
+                bt = catch_backtrace()
+                Base.display_error(err, bt)
                 if jr_controller.err_handler !== nothing
                     jr_controller.err_handler(err, bt)
                 else

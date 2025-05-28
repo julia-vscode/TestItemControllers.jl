@@ -4,7 +4,7 @@ struct TestEnvironment
     package_name::String
     juliaCmd::String
     juliaArgs::Vector{String}
-    juliaNumThreads::String
+    juliaNumThreads::Union{Missing,String}
     mode::String
     env::Dict{String,Union{String,Nothing}}
 end

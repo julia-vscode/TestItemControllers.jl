@@ -79,6 +79,11 @@ function create_testprocess(
 
         cs = CancellationTokens.CancellationTokenSource()
 
+        queued_tests_n = 0
+        queued_test_cancels_n = 0
+        finished_testitems = Set{String}()
+        testitems_to_run_when_ready = nothing
+
         state = :created
 
         while true
@@ -97,12 +102,26 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :start_testrun
-                state in (:created, :foo) || error("Invalid state transition")
+                state in (:created, :idle) || error("Invalid state transition from $state.")
                 state = :testrun_idle
 
                 testrun_channel = msg.testrun_channel
                 test_setups =msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
+            elseif msg.event == :cancel_test_run
+                kill(jl_process)
+                jl_process = nothing
+                endpoint = nothing
+                # put!(msg_channel, (;event = :start))
+
+                # tp.killed = true
+    #                 @info "Now canceling $(tp.id)"
+    #                 put!(tp.controller_msg_channel, (source=:testprocess, msg=(event=:test_process_status_changed, id=tp.id, status="Canceling")))
+    #                 @info "Canceling process $(tp.id)"
+    #                 kill(tp.jl_process)
+
+    #                 put!(tp.controller_msg_channel, (source=:testprocess, msg=(event=:test_process_terminated, id=tp.id)))
+    #                 break
             elseif msg.event == :revise
                 state == :testrun_idle || error("Invalid state transition")
                 state = :testrun_revising
@@ -154,7 +173,7 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :end_testrun
-                state == :testrun_idle || error("Invalid state transition")
+                state == :testrun_idle || error("Invalid state transition from $state")
                 state = :idle
 
                 testrun_channel = nothing
@@ -182,7 +201,7 @@ function create_testprocess(
                             )
                         )
 
-                        put!(testrun_channel, (source=:testprocess, msg=(;event=:precompile_done, env=env)))
+                        put!(testrun_channel, (source=:testprocess, msg=(;event=:precompile_done, env=env, testprocess_id=testprocess_id)))
                         put!(msg_channel, (;event=:testprocess_activated))
                     catch err
                         Base.display_error(err, catch_backtrace())
@@ -191,8 +210,8 @@ function create_testprocess(
                     state = :testrun_waiting_for_precompile_done
                 end
             elseif msg.event == :precompile_by_other_proc_done
-                state == :testrun_waiting_for_precompile_done || error("Invalid state transition")
-
+                state == :testrun_waiting_for_precompile_done || error("Invalid state transition from $state.")
+                state = :activating_env
 
                 precompile_done = true
                 if !is_precompile_process && jl_process !== nothing
@@ -213,6 +232,8 @@ function create_testprocess(
                     end
                 end
             elseif msg.event == :testprocess_activated
+                state in (:activating_env, :testrun_precompiling, :testrun_revising) || error("Invalid state transition from $state.")
+                state = :configuring_test_run
                 @async try
                     JSONRPC.send(
                         endpoint,
@@ -229,6 +250,8 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :testprocess_testsetups_loaded
+                state == :configuring_test_run || error("Invalid state transition from $state.")
+                state = :ready_to_run_tests
                 put!(
                     testrun_channel,
                     (
@@ -240,35 +263,85 @@ function create_testprocess(
                         )
                     )
                 )
-            elseif msg.event == :run_testitems
-                put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Running"))
-                @async try
-                    JSONRPC.send(
-                        endpoint,
-                        TestItemServerProtocol.testserver_run_testitems_batch_request_type,
-                        TestItemServerProtocol.RunTestItemsRequestParams(
-                            mode = env.mode,
-                            coverageRootUris = something(coverage_root_uris, missing),
-                            testItems = TestItemServerProtocol.RunTestItem[
-                                TestItemServerProtocol.RunTestItem(
-                                    id = i.id,
-                                    uri = i.uri,
-                                    name = i.label,
-                                    packageName = something(i.package_name, missing),
-                                    packageUri = something(i.package_uri, missing),
-                                    useDefaultUsings = i.option_default_imports,
-                                    testSetups = i.test_setups,
-                                    line = i.code_line,
-                                    column = i.code_column,
-                                    code = i.code,
-                                ) for i in msg.testitems
-                            ],
+
+                if testitems_to_run_when_ready!==nothing
+                    state = :running_tests
+
+                    queued_tests_n == length(finished_testitems) || error("HA, $queued_tests_n")
+                    queued_tests_n = length(testitems_to_run_when_ready)
+                    empty!(finished_testitems)
+
+                    put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Running"))
+                    @async try
+                        JSONRPC.send(
+                            endpoint,
+                            TestItemServerProtocol.testserver_run_testitems_batch_request_type,
+                            TestItemServerProtocol.RunTestItemsRequestParams(
+                                mode = env.mode,
+                                coverageRootUris = something(coverage_root_uris, missing),
+                                testItems = TestItemServerProtocol.RunTestItem[
+                                    TestItemServerProtocol.RunTestItem(
+                                        id = i.id,
+                                        uri = i.uri,
+                                        name = i.label,
+                                        packageName = something(i.package_name, missing),
+                                        packageUri = something(i.package_uri, missing),
+                                        useDefaultUsings = i.option_default_imports,
+                                        testSetups = i.test_setups,
+                                        line = i.code_line,
+                                        column = i.code_column,
+                                        code = i.code,
+                                    ) for i in testitems_to_run_when_ready
+                                ],
+                            )
                         )
-                    )
-                catch err
-                    Base.display_error(err, catch_backtrace())
+                        testitems_to_run_when_ready! = nothing
+                    catch err
+                        Base.display_error(err, catch_backtrace())
+                    end
+                end
+            elseif msg.event == :run_testitems
+                if state in (:ready_to_run_tests, :testrun_idle)
+                    state = :running_tests
+
+                    queued_tests_n == length(finished_testitems) || error("HA, $queued_tests_n")
+                    queued_tests_n = length(msg.testitems)
+                    empty!(finished_testitems)
+
+                    put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Running"))
+                    @async try
+                        JSONRPC.send(
+                            endpoint,
+                            TestItemServerProtocol.testserver_run_testitems_batch_request_type,
+                            TestItemServerProtocol.RunTestItemsRequestParams(
+                                mode = env.mode,
+                                coverageRootUris = something(coverage_root_uris, missing),
+                                testItems = TestItemServerProtocol.RunTestItem[
+                                    TestItemServerProtocol.RunTestItem(
+                                        id = i.id,
+                                        uri = i.uri,
+                                        name = i.label,
+                                        packageName = something(i.package_name, missing),
+                                        packageUri = something(i.package_uri, missing),
+                                        useDefaultUsings = i.option_default_imports,
+                                        testSetups = i.test_setups,
+                                        line = i.code_line,
+                                        column = i.code_column,
+                                        code = i.code,
+                                    ) for i in msg.testitems
+                                ],
+                            )
+                        )
+                    catch err
+                        Base.display_error(err, catch_backtrace())
+                    end
+                elseif state == :starting
+                    testitems_to_run_when_ready = msg.testitems
+                else
+                    error("Invalid state transition from $state on $testprocess_id.")
                 end
             elseif msg.event == :steal
+                queued_test_cancels_n += length(msg.testitem_ids)
                 @async try
                     JSONRPC.send(
                             endpoint,
@@ -292,6 +365,21 @@ function create_testprocess(
                     )
                 )
             elseif msg.event in (:testitem_passed, :testitem_failed, :testitem_errored, :testitem_skipped_stolen)
+                state == :running_tests || error("Invalid state transition from $state, id is $testprocess_id, testitem_id $(msg.testitem_id) has $(msg.event)")
+
+                if msg.event == :testitem_skipped_stolen
+                    push!(finished_testitems, msg.testitem_id)
+                    queued_test_cancels_n -= 1
+                elseif !(msg.testitem_id in finished_testitems)
+                    push!(finished_testitems, msg.testitem_id)
+                else
+                    error("asdf")
+                end
+
+                if queued_tests_n == length(finished_testitems) && queued_test_cancels_n == 0
+                    state = :testrun_idle
+                end
+
                 if msg.event == :testitem_passed
                     put!(
                         testrun_channel,
@@ -391,7 +479,7 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
 
     jlArgs = copy(env.juliaArgs)
 
-    if env.juliaNumThreads == "auto"
+    if env.juliaNumThreads!==missing && env.juliaNumThreads == "auto"
         push!(jlArgs, "--threads=auto")
     end
 
@@ -405,7 +493,7 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
         end
     end
 
-    if env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
+    if env.juliaNumThreads!==missing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
         jlEnv["JULIA_NUM_THREADS"] = env.juliaNumThreads
     end
 
