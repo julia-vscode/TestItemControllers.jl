@@ -301,7 +301,7 @@ function create_testprocess(
                     end
                 end
             elseif msg.event == :run_testitems
-                if state in (:ready_to_run_tests, :testrun_idle)
+                if state in (:ready_to_run_tests, :testrun_idle, :running_tests)
                     state = :running_tests
 
                     queued_tests_n == length(finished_testitems) || error("HA, $queued_tests_n")
