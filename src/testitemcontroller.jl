@@ -297,6 +297,8 @@ function execute_testrun(
 
     @info "Creating new test run"
 
+    state = :created
+
     testrun_msg_queue = Channel{Any}(Inf)
     controller.testrun_msg_channels[testrun_id] = testrun_msg_queue
     our_procs = nothing
@@ -369,6 +371,8 @@ function execute_testrun(
         )
     end
 
+    state = :procs_requested
+
     put!(
         controller.msg_channel,
         (
@@ -395,7 +399,6 @@ function execute_testrun(
     coverage_results = missing
 
     processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
-    procs_acquired = false
 
     while true
         msg = take!(testrun_msg_queue)
@@ -403,6 +406,7 @@ function execute_testrun(
 
         if msg.source==:controller
             if msg.msg.event==:procs_acquired
+                state == :procs_requested || error("Invalid state transition from $state")
                 our_procs = msg.msg.procs
 
                 # Now distribute test items over test processes
@@ -413,7 +417,7 @@ function execute_testrun(
                     end
                 end
 
-                procs_acquired = true
+                state = :all_procs_acquired
 
                 for i in processes_that_are_ready
                     put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
@@ -429,7 +433,9 @@ function execute_testrun(
             end
         elseif msg.source==:testprocess
             if msg.msg.event == :ready_to_run_testitems
-                if procs_acquired
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
+                if state == :all_procs_acquired
                     put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
                 else
                     push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
@@ -437,23 +443,31 @@ function execute_testrun(
             elseif msg.msg.event == :attach_debugger
                 attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
             elseif msg.msg.event == :precompile_done
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
                 for i in our_procs[msg.msg.env]
                     if i.id !== msg.msg.testprocess_id
                         put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
                     end
                 end
             elseif msg.msg.event == :started
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
                 testitem_started_callback(
                     testrun_id,
                     msg.msg.testitemid
                 )
             elseif msg.msg.event == :append_output
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
                 append_output_callback(
                     testrun_id,
                     msg.msg.testitemid,
                     msg.msg.output
                 )
             elseif msg.msg.event in (:passed, :failed, :errored, :skipped_stolen)
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
                 idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
                 if msg.msg.event == :skipped_stolen
                     deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], idx)
@@ -590,6 +604,8 @@ function execute_testrun(
 
                 end
             elseif msg.msg.event == :test_process_terminated
+                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
                 for procs in values(controller.testprocesses)
                     ind = findfirst(i->i.id==msg.msg.id, procs)
                     if ind!==nothing
@@ -599,15 +615,8 @@ function execute_testrun(
 
                 # Inform the user via callback
                 testprocess_terminated(msg.msg.id)
-            elseif msg.msg.event == :finished_batch
-
             else
                 error("Unknown message")
-            end
-
-            if msg.msg.event in (:passed, :failed, :errored, :skipped)
-
-
             end
         else
             error("Unknown source")
