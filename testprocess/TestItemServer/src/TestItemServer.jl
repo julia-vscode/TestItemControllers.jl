@@ -441,31 +441,45 @@ function create_test_message_for_failed(i)
 end
 
 function extract_expected_and_actual(result)
+    actual = nothing
+    expected = nothing
+
     if isa(result, Test.Fail)
         s = result.data
+
         if isa(s, String)
-            m = match(r"\"(.*)\" == \"(.*)\"", s)
+            m = match(r"\"(.*)\" == \"(.*)\""s, s)
             if m !== nothing
                 try
                     expected = unescape_string(m.captures[2])
                     actual = unescape_string(m.captures[1])
-
-                    if expected === nothing
-                        expected = missing
-                    end
-                    if actual ===nothing
-                        actual = missing
-                    end
-                    return (expected, actual)
                 catch err
                     # theoretically possible if a user registers a Fail instance that matches
                     # above regexp, but doesn't contain two escaped strings.
                     # just return nothing in this unlikely case, meaning no diff will be shown.
                 end
+            else
+                # Now try the version without quotation marks
+                m = match(r"(.*) == (.*)"s, s)
+                if m !== nothing
+                    try
+                        expected = unescape_string(m.captures[2])
+                        actual = unescape_string(m.captures[1])
+                    catch err
+                        # theoretically possible if a user registers a Fail instance that matches
+                        # above regexp, but doesn't contain two escaped strings.
+                        # just return nothing in this unlikely case, meaning no diff will be shown.
+                    end
+                end
             end
         end
     end
-    return (missing, missing)
+
+    if actual !== nothing && expected !== nothing
+        return (expected, actual)
+    else
+        return (missing, missing)
+    end
 end
 
 
