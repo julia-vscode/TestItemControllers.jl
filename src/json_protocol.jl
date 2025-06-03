@@ -23,7 +23,7 @@ end
     packageName::Union{Missing,String}
     packageUri::Union{Missing,String}
     projectUri::Union{Missing,String}
-    envContentHash::Union{Missing,UInt64}
+    envContentHash::Union{Missing,String}
     useDefaultUsings::Bool
     testSetups::Vector{String}
     line::Int

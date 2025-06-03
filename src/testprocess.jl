@@ -56,7 +56,7 @@ function create_testprocess(
         controller_msg_channel::Channel,
         env::TestEnvironment,
         is_precompile_process::Bool,
-        test_env_content_hash::Union{Nothing,UInt64},
+        test_env_content_hash::Union{Nothing,String},
         error_handler_file,
         crash_reporting_pipename)
 

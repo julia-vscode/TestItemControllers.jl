@@ -259,7 +259,7 @@ struct TestItemDetail
     package_name::Union{Nothing,String}
     package_uri::Union{Nothing,String}
     project_uri::Union{Nothing,String}
-    env_content_hash::Union{Nothing,UInt64}
+    env_content_hash::Union{Nothing,String}
     option_default_imports::Bool
     test_setups::Vector{String}
     line::Int
@@ -310,7 +310,7 @@ function execute_testrun(
 
     testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
 
-    env_content_hash_by_env = Dict{TestEnvironment,UInt64}()
+    env_content_hash_by_env = Dict{TestEnvironment,String}()
 
     for i in values(valid_test_items)
         te = TestEnvironment(
