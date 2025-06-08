@@ -42,14 +42,6 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
             testitem_id = params.testItemId
         )
     )
-    TestItemServerProtocol.append_output_notification_type => (params, msg_channel) -> put!(
-        msg_channel,
-        (
-            event = :append_output,
-            testitem_id = params.testItemId,
-            output = params.output
-        )
-    )
 end
 
 function create_testprocess(
@@ -521,7 +513,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
             buffer *= data_as_string
 
             output_for_test_proc = IOBuffer()
-            output_for_test_items = Dict{String,IOBuffer}()
+            output_for_test_items = Pair{Union{Nothing,String},IOBuffer}[]
 
             i = 1
             while i<=length(buffer)
@@ -574,10 +566,12 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 if !might_be_begin_marker && !might_be_end_marker
                     print(output_for_test_proc, buffer[i])
 
-                    if current_output_testitem_id !== nothing
-                        output_for_ti = get!(() -> IOBuffer(), output_for_test_items, current_output_testitem_id)
-                        print(output_for_ti, buffer[i])
+                    if length(output_for_test_items) == 0 || output_for_test_items[end].first !== current_output_testitem_id
+                        push!(output_for_test_items, current_output_testitem_id => IOBuffer())
                     end
+
+                    output_for_ti = output_for_test_items[end].second
+                    print(output_for_ti, buffer[i])
 
                     i = nextind(buffer, i)
                 end
@@ -598,7 +592,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 )
             end
 
-            for (k,v) in pairs(output_for_test_items)
+            for (k,v) in output_for_test_items
                 output_for_ti_as_string = String(take!(v))
 
                 if length(output_for_ti_as_string) > 0
@@ -606,7 +600,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                         testprocess_msg_channel,
                         (
                             event = :append_output,
-                            testitem_id = k,
+                            testitem_id = something(k, missing),
                             output = replace(output_for_ti_as_string, "\n"=>"\r\n")
                         )
                     )

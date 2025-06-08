@@ -118,11 +118,6 @@ end
     testItemId::String
 end
 
-@dict_readable struct AppendOutputParams <: JSONRPC.Outbound
-    testItemId::Union{Missing,String}
-    output::String
-end
-
 # Messages from the controller to the test process
 const testserver_revise_request_type = JSONRPC.RequestType("testserver/revise", Nothing, String)
 const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, Nothing)
@@ -137,6 +132,5 @@ const passed_notification_type = JSONRPC.NotificationType("passed", PassedParams
 const errored_notification_type = JSONRPC.NotificationType("errored", ErroredParams)
 const failed_notification_type = JSONRPC.NotificationType("failed", FailedParams)
 const skipped_stolen_notification_type = JSONRPC.NotificationType("skippedStolen", SkippedStolenParams)
-const append_output_notification_type = JSONRPC.NotificationType("appendOutput", AppendOutputParams)
 
 end

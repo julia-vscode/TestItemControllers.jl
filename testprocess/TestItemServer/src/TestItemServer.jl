@@ -533,36 +533,26 @@ end
 
 
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token)
-
-    c = IOCapture.capture() do
-        if params.projectUri===missing
-            @static if VERSION >= v"1.5.0"
-                Pkg.activate(temp=true)
-            else
-                temp_path = mktempdir()
-                Pkg.activate(temp_path)
-            end
-
-            Pkg.develop(Pkg.PackageSpec(path=uri2filepath(params.packageUri)))
-
-            TestEnv.activate(params.packageName)
+    if params.projectUri===missing
+        @static if VERSION >= v"1.5.0"
+            Pkg.activate(temp=true)
         else
-            Pkg.activate(uri2filepath(params.projectUri))
+            temp_path = mktempdir()
+            Pkg.activate(temp_path)
+        end
 
-            if params.packageName!==missing
-                TestEnv.activate(params.packageName)
-            end
+        Pkg.develop(Pkg.PackageSpec(path=uri2filepath(params.packageUri)))
+
+        TestEnv.activate(params.packageName)
+    else
+        Pkg.activate(uri2filepath(params.projectUri))
+
+        if params.packageName!==missing
+            TestEnv.activate(params.packageName)
         end
     end
 
-    JSONRPC.send(
-        state.endpoint,
-        TestItemServerProtocol.append_output_notification_type,
-        TestItemServerProtocol.AppendOutputParams(
-            testItemId = missing,
-            output = replace(strip(c.output), "\n"=>"\r\n") * "\r\n\r\n"
-        )
-    )
+    return nothing
 end
 
 function configure_test_run_request(params::TestItemServerProtocol.ConfigureTestRunRequestParams, state::TestProcessState, token)
