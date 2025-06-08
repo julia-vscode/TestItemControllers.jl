@@ -168,7 +168,7 @@ function create_testprocess(
 
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
-                    start(testprocess_id, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(cs))
+                    start(testprocess_id, controller_msg_channel, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(cs))
                 catch err
                     Base.display_error(err, catch_backtrace())
                 end
@@ -462,13 +462,13 @@ function create_testprocess(
     return testprocess_id, msg_channel
 end
 
-function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
+function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
     testserver_script = joinpath(@__DIR__, "../testprocess/app/testserver_main.jl")
 
-    pipe_out = IOBuffer()
+    pipe_out = Pipe()
 
     coverage_arg = env.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
 
@@ -510,18 +510,109 @@ function start(testprocess_id, testprocess_msg_channel, env::TestEnvironment, de
     )
 
     @async try
-        while true
-            s = String(take!(pipe_out))
+        begin_marker = "3805a0ad41b54562a46add40be31ca27"
+        end_marker = "4031af82-8c3d-406c-a42e-25628bb0aa77"
+        buffer = ""
+        current_output_testitem_id = nothing
+        while !eof(pipe_out)
+            data = readavailable(pipe_out)
+            data_as_string = String(data)
 
-            put!(
-                controller_msg_channel,
-                (
-                    event = :testprocess_output,
-                    id = testrun_id,
-                    output = s
+            buffer *= data_as_string
+
+            output_for_test_proc = IOBuffer()
+            output_for_test_items = Dict{String,IOBuffer}()
+
+            i = 1
+            while i<=length(buffer)
+                might_be_begin_marker = false
+                might_be_end_marker = false
+
+                if current_output_testitem_id === nothing
+                    j = 1
+                    might_be_begin_marker = true
+                    while i + j - 1<=length(buffer) && j <= length(begin_marker)
+                        if buffer[i + j - 1] != begin_marker[j] || nextind(buffer, i + j - 1) != i + j
+                            might_be_begin_marker = false
+                            break
+                        end
+                        j += 1
+                    end
+                    is_begin_marker = might_be_begin_marker && length(buffer) - i + 1 >= length(begin_marker)
+
+                    if is_begin_marker
+                        ti_id_end_index = findfirst("\"", SubString(buffer, i))
+                        if ti_id_end_index === nothing
+                            break
+                        else
+                            current_output_testitem_id = SubString(buffer, i + length(begin_marker), ti_id_end_index.start - 1)
+                            i = nextind(buffer, ti_id_end_index.start)
+                        end
+                    elseif might_be_begin_marker
+                        break
+                    end
+                else
+                    j = 1
+                    might_be_end_marker = true
+                    while i + j - 1<=length(buffer) && j <= length(end_marker)
+                        if buffer[i + j - 1] != end_marker[j] || nextind(buffer, i + j - 1) != i + j
+                            might_be_end_marker = false
+                            break
+                        end
+                        j += 1
+                    end
+                    is_end_marker = might_be_end_marker && length(buffer) - i + 1 >= length(end_marker)
+
+                    if is_end_marker
+                        current_output_testitem_id = nothing
+                        i = i + length(end_marker)
+                    elseif might_be_end_marker
+                        break
+                    end
+                end
+
+                if !might_be_begin_marker && !might_be_end_marker
+                    print(output_for_test_proc, buffer[i])
+
+                    if current_output_testitem_id !== nothing
+                        output_for_ti = get!(() -> IOBuffer(), output_for_test_items, current_output_testitem_id)
+                        print(output_for_ti, buffer[i])
+                    end
+
+                    i = nextind(buffer, i)
+                end
+            end
+
+            buffer = buffer[i:end]
+
+            output_for_test_proc_as_string = String(take!(output_for_test_proc))
+
+            if length(output_for_test_proc_as_string) > 0
+                put!(
+                    controller_msg_channel,
+                    (
+                        event = :testprocess_output,
+                        id = testprocess_id,
+                        output = output_for_test_proc_as_string
+                    )
                 )
-            )
-            sleep(0.5)
+            end
+
+            for (k,v) in pairs(output_for_test_items)
+                output_for_ti_as_string = String(take!(v))
+
+                if length(output_for_ti_as_string) > 0
+                    put!(
+                        testprocess_msg_channel,
+                        (
+                            event = :append_output,
+                            testitem_id = k,
+                            output = replace(output_for_ti_as_string, "\n"=>"\r\n")
+                        )
+                    )
+                end
+            end
+
         end
     catch err
         bt = catch_backtrace()

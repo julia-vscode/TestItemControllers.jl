@@ -663,23 +663,16 @@ function runner_loop(state::TestProcessState)
                     )
                 )
             else
-                c = IOCapture.capture(passthrough=false) do
-                    run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
-                end
+                print(stderr, "3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
+                flush(stderr)
+                ret = run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
+                print(stderr, "4031af82-8c3d-406c-a42e-25628bb0aa77")
+                flush(stderr)
 
                 JSONRPC.send(
                     state.endpoint,
-                    TestItemServerProtocol.append_output_notification_type,
-                    TestItemServerProtocol.AppendOutputParams(
-                        testItemId = current_testitem.id,
-                        output = replace(strip(c.output), "\n"=>"\r\n") * "\r\n"
-                    )
-                )
-
-                JSONRPC.send(
-                    state.endpoint,
-                    c.value[1],
-                    c.value[2]
+                    ret[1],
+                    ret[2]
                 )
             end
         end
