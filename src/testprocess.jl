@@ -507,7 +507,6 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
         buffer = ""
         current_output_testitem_id = nothing
         while !eof(pipe_out)
-            sleep(1.0)
             data = readavailable(pipe_out)
             data_as_string = String(data)
 
@@ -567,7 +566,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 if !might_be_begin_marker && !might_be_end_marker
                     print(output_for_test_proc, buffer[i])
 
-                    if length(output_for_test_items) == 0 || output_for_test_items[end].first !== current_output_testitem_id
+                    if length(output_for_test_items) == 0 || output_for_test_items[end].first != current_output_testitem_id
                         push!(output_for_test_items, current_output_testitem_id => IOBuffer())
                     end
 
