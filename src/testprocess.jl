@@ -507,6 +507,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
         buffer = ""
         current_output_testitem_id = nothing
         while !eof(pipe_out)
+            sleep(1.0)
             data = readavailable(pipe_out)
             data_as_string = String(data)
 
