@@ -537,8 +537,8 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                         if ti_id_end_index === nothing
                             break
                         else
-                            current_output_testitem_id = SubString(buffer, i + length(begin_marker), ti_id_end_index.start - 1)
-                            i = nextind(buffer, ti_id_end_index.start)
+                            current_output_testitem_id = SubString(buffer, i + length(begin_marker), i + ti_id_end_index.start - 2)
+                            i = nextind(buffer, i + ti_id_end_index.start - 1)
                         end
                     elseif might_be_begin_marker
                         break
@@ -606,7 +606,6 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                     )
                 end
             end
-
         end
     catch err
         bt = catch_backtrace()
