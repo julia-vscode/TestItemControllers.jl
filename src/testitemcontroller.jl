@@ -102,7 +102,7 @@ function Base.run(
 
                 existing_idle_procs = filter(i->i.idle, testprocesses)
 
-                @info "We need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
+                @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv: $(k.env)\n\nWe need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
 
                 # Grab existing procs
                 for p in Iterators.take(existing_idle_procs, v)
