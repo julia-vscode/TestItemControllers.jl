@@ -502,8 +502,8 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
     )
 
     @async try
-        begin_marker = "3805a0ad41b54562a46add40be31ca27"
-        end_marker = "4031af82-8c3d-406c-a42e-25628bb0aa77"
+        begin_marker = "\x1f3805a0ad41b54562a46add40be31ca27"
+        end_marker = "\x1f4031af828c3d406ca42e25628bb0aa77"
         buffer = ""
         current_output_testitem_id = nothing
         while !eof(pipe_out)

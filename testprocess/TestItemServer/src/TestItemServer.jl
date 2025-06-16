@@ -653,10 +653,10 @@ function runner_loop(state::TestProcessState)
                     )
                 )
             else
-                print(stderr, "3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
+                print(stderr, "\x1f3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
                 flush(stderr)
                 ret = run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
-                print(stderr, "4031af82-8c3d-406c-a42e-25628bb0aa77")
+                print(stderr, "\x1f4031af828c3d406ca42e25628bb0aa77")
                 flush(stderr)
 
                 JSONRPC.send(
