@@ -121,7 +121,7 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
         ),
         # attach_debugger_callback
         (testrun_id, debug_pipename) -> JSONRPC.send(
-            jr_endpoint,
+            jr_controller.endpoint,
             TestItemControllerProtocol.notificationTypeLaunchDebugger,
             (;
                 debugPipeName = debug_pipename,
