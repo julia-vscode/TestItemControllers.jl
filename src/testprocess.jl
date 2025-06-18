@@ -174,10 +174,6 @@ function create_testprocess(
             elseif msg.event == :testprocess_launched
                 state == :testrun_starting || error("Invalid state transition.")
 
-
-                if env.mode == "Debug"
-                    put!(testrun_channel, (source=:testprocess, msg=(;event=:attach_debugger, debug_pipe_name=debug_pipe_name)))
-                end
                 jl_process = msg.jl_process
                 endpoint = msg.endpoint
                 if is_precompile_process || precompile_done
@@ -226,6 +222,11 @@ function create_testprocess(
             elseif msg.event == :testprocess_activated
                 state in (:activating_env, :testrun_precompiling, :testrun_revising) || error("Invalid state transition from $state.")
                 state = :configuring_test_run
+
+                if env.mode == "Debug"
+                    put!(testrun_channel, (source=:testprocess, msg=(;event=:attach_debugger, debug_pipe_name=debug_pipe_name)))
+                end
+
                 @async try
                     JSONRPC.send(
                         endpoint,
