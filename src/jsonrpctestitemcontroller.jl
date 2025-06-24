@@ -148,14 +148,8 @@ function cancel_testrun_notification(params::TestItemControllerProtocol.CancelTe
     end
 end
 
-function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, controller::JSONRPCTestItemController, token)
-    for v in values(controller.testprocesses)
-        for p in v
-            if p.id == params.testProcessId
-                put!(p.channel_to_sub, (source=:controller, msg=(;command=:terminate)))
-            end
-        end
-    end
+function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, json_controller::JSONRPCTestItemController, token)
+    terminate_test_process(json_controller.controller, params.testProcessId)
 end
 
 JSONRPC.@message_dispatcher dispatch_msg begin

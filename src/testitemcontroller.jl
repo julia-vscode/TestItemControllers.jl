@@ -60,6 +60,18 @@ function shutdown(controller::TestItemController)
     end
 end
 
+function terminate_test_process(controller::TestItemController, id::String)
+    for v in values(controller.testprocesses)
+        for p in v
+            if p.id == id
+                put!(p.msg_channel, (;event=:terminate))
+            end
+        end
+    end
+
+    return nothing
+end
+
 function Base.run(
         controller::TestItemController,
         testprocess_created_callback,

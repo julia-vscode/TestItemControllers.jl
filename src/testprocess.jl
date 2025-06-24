@@ -93,6 +93,8 @@ function create_testprocess(
                 catch err
                     Base.display_error(err, catch_backtrace())
                 end
+            elseif msg.event == :terminate
+                error("NOT YET IMPLEMENTED")
             elseif msg.event == :start_testrun
                 state in (:created, :idle) || error("Invalid state transition from $state.")
                 state = :testrun_idle
