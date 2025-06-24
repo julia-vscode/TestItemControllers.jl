@@ -21,7 +21,6 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
 end
 
 function create_testrun_request(params::TestItemControllerProtocol.CreateTestRunParams, jr_controller::JSONRPCTestItemController, token)
-    try
     ret =  execute_testrun(
         jr_controller.controller,
         params.testRunId,
@@ -132,10 +131,6 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
     )
 
     return TestItemControllerProtocol.CreateTestRunResponse("success", ret)
-
-    catch err
-        Base.display_error(err, catch_backtrace())
-    end
 end
 
 function cancel_testrun_notification(params::TestItemControllerProtocol.CancelTestRunParams, controller::JSONRPCTestItemController, token)
@@ -180,7 +175,6 @@ function Base.run(jr_controller::JSONRPCTestItemController)
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
                 bt = catch_backtrace()
-                Base.display_error(err, bt)
                 if jr_controller.err_handler !== nothing
                     jr_controller.err_handler(err, bt)
                 else
