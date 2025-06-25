@@ -3,7 +3,7 @@ using CodeTracking
 using Test
 
 # This is a test-for-tests, verifying the code in utils.jl.
-if !isdefined(@__MODULE__, :read_and_parse)
+if !JuliaInterpreter.isdefinedglobal(@__MODULE__, :read_and_parse)
     include("utils.jl")
 end
 
@@ -85,8 +85,10 @@ module EvalLimited end
         insert!(ex.args, 1, LineNumberNode(1, Symbol("fake.jl")))
     end
     modexs = collect(ExprSplitter(EvalLimited, ex))
+    # See "uncomment the following..." in test/utils.jl for how to calibrate `nstmts` below
+    # Adjust α so that the recursive mode ends up back in "fake.jl"
     @static if VERSION >= v"1.12-"
-        nstmts = 10*21 + 27 # 10 * 21 statements per iteration + α
+        nstmts = 10*24 + 50 # 10 * 24 statements per iteration + α in compiled mode
     elseif VERSION >= v"1.11-"
         nstmts = 10*17 + 20 # 10 * 17 statements per iteration + α
     else
@@ -97,7 +99,7 @@ module EvalLimited end
         @test isa(frame, Frame)
         nstmtsleft = nstmts
         while true
-            ret, nstmtsleft = evaluate_limited!(Compiled(), frame, nstmtsleft, true)
+            ret, nstmtsleft = evaluate_limited!(NonRecursiveInterpreter(), frame, nstmtsleft, true)
             isa(ret, Some{Any}) && break
             isa(ret, Aborted) && (push!(aborts, ret); break)
         end

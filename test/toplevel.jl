@@ -1,4 +1,6 @@
-if !isdefined(@__MODULE__, :read_and_parse)
+using JuliaInterpreter: isdefinedglobal
+
+if !isdefinedglobal(@__MODULE__, :read_and_parse)
     include("utils.jl")
 end
 
@@ -46,8 +48,8 @@ end
         end
         """)
     modexs = collect(ExprSplitter(JIVisible, ex))
-    @test isdefined(JIVisible, :OuterModDocstring)
-    @test isdefined(JIVisible.OuterModDocstring, :InnerModDocstring)
+    @test isdefinedglobal(JIVisible, :OuterModDocstring)
+    @test isdefinedglobal(JIVisible.OuterModDocstring, :InnerModDocstring)
 
     # issue #538
     @test !JuliaInterpreter.is_doc_expr(:(Core.@doc "string"))
@@ -60,10 +62,10 @@ end
     m, ex = first(modexs)       # FIXME don't use index in tests
     @test !JuliaInterpreter.is_doc_expr(ex.args[2])
 
-    @test !isdefined(Main, :JIInvisible)
+    @test !isdefinedglobal(Main, :JIInvisible)
     collect(ExprSplitter(JIVisible, :(module JIInvisible f() = 1 end)))  # this looks up JIInvisible rather than create it
-    @test !isdefined(Main, :JIInvisible)
-    @test  isdefined(JIVisible, :JIInvisible)
+    @test !isdefinedglobal(Main, :JIInvisible)
+    @test  isdefinedglobal(JIVisible, :JIInvisible)
     mktempdir() do path
         push!(LOAD_PATH, path)
         open(joinpath(path, "TmpPkg1.jl"), "w") do io
@@ -82,15 +84,15 @@ end
         end
         @eval using TmpPkg1
         # Every package is technically parented in Main but the name may not be visible in Main
-        @test isdefined(@__MODULE__, :TmpPkg1)
-        @test !isdefined(@__MODULE__, :TmpPkg2)
+        @test @eval isdefinedglobal(@__MODULE__, :TmpPkg1)
+        @test @eval !isdefinedglobal(@__MODULE__, :TmpPkg2)
         collect(ExprSplitter(@__MODULE__, quote
                 module TmpPkg2
                 f() = 2
                 end
             end))
-        @test isdefined(@__MODULE__, :TmpPkg1)
-        @test !isdefined(@__MODULE__, :TmpPkg2)
+        @test @eval isdefinedglobal(@__MODULE__, :TmpPkg1)
+        @test @eval !isdefinedglobal(@__MODULE__, :TmpPkg2)
     end
 
     # Revise issue #718
@@ -119,7 +121,7 @@ module Toplevel end
     for (mod, ex) in modexs
         frame = Frame(mod, ex)
         while true
-            JuliaInterpreter.through_methoddef_or_done!(frame) === nothing && break
+            invokelatest(JuliaInterpreter.through_methoddef_or_done!, frame) === nothing && break
         end
     end
 
@@ -188,7 +190,7 @@ module Toplevel end
     @test Toplevel.paramtype(Vector) == Toplevel.NoParam
     @test Toplevel.Inner.g() == 5
     @test Toplevel.Inner.InnerInner.g() == 6
-    @test isdefined(Toplevel, :Beat)
+    @test isdefinedglobal(Toplevel, :Beat)
     @test Toplevel.Beat <: Toplevel.DatesMod.Period
 
     @test @interpret(Toplevel.f1(0)) == 1
@@ -247,7 +249,7 @@ module Toplevel end
     @test @interpret(Toplevel.Inner.g()) == 5
     @test @interpret(Toplevel.Inner.InnerInner.g()) == 6
     # FIXME: even though they pass, these tests break Test!
-    # @test @interpret(isdefined(Toplevel, :Beat))
+    # @test @interpret(isdefinedglobal(Toplevel, :Beat))
     # @test @interpret(Toplevel.Beat <: Toplevel.DatesMod.Period)
 
     # Check that nested expressions are handled appropriately (module-in-block, internal `using`)
@@ -495,7 +497,7 @@ end
         JuliaInterpreter.finish!(frame, true)
     end
     Core.eval(Toplevel, :(using .NonFrame))
-    @test isdefined(Toplevel, :nffoo)
+    @test isdefinedglobal(Toplevel, :nffoo)
 end
 
 @testset "LOAD_PATH and modules" begin
@@ -603,4 +605,47 @@ end
         @test JuliaInterpreter.finish!(Frame(mod, ex), true) === nothing
     end
     @test length(modexs) == 2     # FIXME don't use index in tests
+end
+
+@testset "External method tables" begin
+    ex = quote
+        external_foo() = 1
+        Base.Experimental.@MethodTable method_table
+    end
+    frame = Frame(Toplevel, ex)
+    JuliaInterpreter.finish!(frame, true)
+
+    nmethods_in_overlay() = length(Base.MethodList(Toplevel.method_table).ms)
+    @test nmethods_in_overlay() == 0
+
+    ex = :(Base.Experimental.@overlay method_table external_foo() = 2)
+    frame = Frame(Toplevel, ex)
+    JuliaInterpreter.finish!(frame, true)
+    @test nmethods_in_overlay() == 1
+
+    ex = :(Base.Experimental.@overlay $(Toplevel.method_table) external_foo(x; y = 3) = 3 + y)
+    frame = Frame(Toplevel, ex)
+    JuliaInterpreter.finish!(frame, true)
+    @test nmethods_in_overlay() == 3 # `external_foo(x)` and `kwcall` methods were added
+
+    ex = :(Base.Experimental.@overlay getproperty(@__MODULE__, :method_table) external_foo(x::Int) = 4)
+    frame = Frame(Toplevel, ex)
+    JuliaInterpreter.finish!(frame, true)
+    @test nmethods_in_overlay() == 4
+end
+
+# Need to wrap rhs of `:const` expression
+let ex = :(const ___symbol___ = :___symbol___)
+    @test JuliaInterpreter.finish_and_return!(Frame(@__MODULE__, ex), true) === :___symbol___
+end
+
+module UsingTest end
+module ImportTest end
+let ex = quote using Test end
+    JuliaInterpreter.finish_and_return!(Frame(UsingTest, ex), true)
+    @test @invokelatest JuliaInterpreter.isdefinedglobal(UsingTest, :Test)
+end
+let ex = quote import Test end
+    JuliaInterpreter.finish_and_return!(Frame(ImportTest, ex), true)
+    @test @invokelatest JuliaInterpreter.isdefinedglobal(ImportTest, :Test)
 end

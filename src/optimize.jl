@@ -7,6 +7,25 @@ function lookup_stmt(stmts::Vector{Any}, @nospecialize arg)
     end
     if isa(arg, QuoteNode)
         return arg.value
+    elseif isexpr(arg, :call, 3) && is_global_ref(arg.args[1], Base, :getproperty)
+        # Starting with Julia 1.12, llvmcall looks like this:
+        # julia> src.code[1:3]
+        # 3-element Vector{Any}:
+        #  :(TheModule.Core)                          # GlobalRef
+        #  :(Base.getproperty(%1, :Intrinsics))
+        #  :(Base.getproperty(%2, :llvmcall))
+        q = arg.args[3]
+        if isa(q, QuoteNode) && (qval = q.value; qval isa Symbol)
+            mod = lookup_stmt(stmts, arg.args[2])
+            if isa(mod, GlobalRef)
+                mod = @invokelatest getglobal(mod.mod, mod.name)
+            end
+            if isa(mod, Module)
+                if @invokelatest isdefinedglobal(mod, qval)
+                    return @invokelatest getglobal(mod, qval)
+                end
+            end
+        end
     end
     return arg
 end
@@ -24,8 +43,11 @@ function smallest_ref(stmts, arg, idmin)
 end
 
 function lookup_global_ref(a::GlobalRef)
-    if Base.isbindingresolved(a.mod, a.name) && isdefined(a.mod, a.name) && isconst(a.mod, a.name)
-        return QuoteNode(getfield(a.mod, a.name))
+    isbindingresolved_deprecated && return a
+    if Base.isbindingresolved(a.mod, a.name) &&
+        (@invokelatest isdefinedglobal(a.mod, a.name)) &&
+        (@invokelatest isconst(a.mod, a.name))
+        return QuoteNode(@invokelatest getfield(a.mod, a.name))
     end
     return a
 end
@@ -112,14 +134,15 @@ function optimize!(code::CodeInfo, scope)
             if stmt.head === :call
                 # Check for :llvmcall
                 arg1 = stmt.args[1]
-                if (arg1 === :llvmcall || lookup_stmt(code.code, arg1) === Base.llvmcall) && isempty(sparams) && scope isa Method
+                larg1 = lookup_stmt(code.code, arg1)
+                if (arg1 === :llvmcall || larg1 === Base.llvmcall || is_global_ref_egal(larg1, :llvmcall, Core.Intrinsics.llvmcall)) && isempty(sparams) && scope isa Method
                     # Call via `invokelatest` to avoid compiling it until we need it
-                    Base.invokelatest(build_compiled_llvmcall!, stmt, code, idx, evalmod)
+                    @invokelatest build_compiled_llvmcall!(stmt, code, idx, evalmod)
                     methodtables[idx] = Compiled()
                 end
             elseif stmt.head === :foreigncall && scope isa Method
                 # Call via `invokelatest` to avoid compiling it until we need it
-                Base.invokelatest(build_compiled_foreigncall!, stmt, code, sparams, evalmod)
+                @invokelatest build_compiled_foreigncall!(stmt, code, sparams, evalmod)
                 methodtables[idx] = Compiled()
             end
         end
@@ -158,12 +181,12 @@ function build_compiled_llvmcall!(stmt::Expr, code::CodeInfo, idx::Int, evalmod:
     frame.pc = idxstart
     if idxstart < idx
         while true
-            pc = step_expr!(Compiled(), frame)
+            pc = step_expr!(NonRecursiveInterpreter(), frame)
             pc === idx && break
             pc === nothing && error("this should never happen")
         end
     end
-    llvmir, RetType, ArgType = @lookup(frame, stmt.args[2]), @lookup(frame, stmt.args[3]), @lookup(frame, stmt.args[4])::DataType
+    llvmir, RetType, ArgType = lookup(frame, stmt.args[2]), lookup(frame, stmt.args[3]), lookup(frame, stmt.args[4])::DataType
     args = stmt.args[5:end]
     argnames = Any[Symbol(:arg, i) for i = 1:length(args)]
     cc_key = (llvmir, RetType, ArgType, evalmod)  # compiled call key
@@ -187,12 +210,20 @@ end
 # Handle :llvmcall & :foreigncall (issue #28)
 function build_compiled_foreigncall!(stmt::Expr, code::CodeInfo, sparams::Vector{Symbol}, evalmod::Module)
     TVal = evalmod == Core.Compiler ? Core.Compiler.Val : Val
-    cfunc, RetType, ArgType = lookup_stmt(code.code, stmt.args[1]), stmt.args[2], stmt.args[3]::SimpleVector
+    cfuncarg = stmt.args[1]
+    while isa(cfuncarg, SSAValue)
+        cfuncarg = lookup_stmt(code.code, cfuncarg)
+    end
+    RetType, ArgType = stmt.args[2], stmt.args[3]::SimpleVector
 
     dynamic_ccall = false
     oldcfunc = nothing
-    if isa(cfunc, Expr) # specification by tuple, e.g., (:clock, "libc")
-        cfunc = something(static_eval(cfunc), cfunc)
+    if isa(cfuncarg, Expr) || isa(cfuncarg, GlobalRef) || isa(cfuncarg, Symbol) # specification by tuple, e.g., (:clock, "libc")
+        cfunc = something(static_eval(evalmod, cfuncarg), cfuncarg)
+    elseif isa(cfuncarg, QuoteNode)
+        cfunc = cfuncarg.value
+    else
+        cfunc = cfuncarg
     end
     if isa(cfunc, Symbol)
         cfunc = QuoteNode(cfunc)
@@ -293,7 +324,7 @@ function replace_coretypes_list!(list::AbstractVector; rev::Bool=false)
             if rval !== val
                 list[i] = ReturnNode(rval)
             end
-        elseif @static (isdefined(Core.IR, :EnterNode) && true) && isa(stmt, Core.IR.EnterNode)
+        elseif @static (isdefinedglobal(Core.IR, :EnterNode) && true) && isa(stmt, Core.IR.EnterNode)
             if isdefined(stmt, :scope)
                 rscope = rep(stmt.scope, rev)
                 if rscope !== stmt.scope
