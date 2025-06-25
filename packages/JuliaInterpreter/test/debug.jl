@@ -1,5 +1,5 @@
 using CodeTracking, JuliaInterpreter, Test
-using JuliaInterpreter: enter_call, enter_call_expr, get_return, @lookup
+using JuliaInterpreter: enter_call, enter_call_expr, get_return
 using Base.Meta: isexpr
 include("utils.jl")
 
@@ -7,7 +7,7 @@ const ALL_COMMANDS = (:n, :s, :c, :finish, :nc, :se, :si, :until)
 
 function step_through_command(fr::Frame, cmd::Symbol)
     while true
-        ret = JuliaInterpreter.debug_command(JuliaInterpreter.finish_and_return!, fr, cmd)
+        ret = JuliaInterpreter.debug_command(fr, cmd)
         ret == nothing && break
         fr, pc = ret
     end
@@ -81,7 +81,7 @@ end
                 oframe = frame = enter_call(func, args...; kwargs...)
                 frame = JuliaInterpreter.maybe_step_through_kwprep!(frame, false)
                 frame = JuliaInterpreter.maybe_step_through_wrapper!(frame)
-                @test JuliaInterpreter.hasarg(JuliaInterpreter.isidentical(QuoteNode(==)), frame.framecode.src.code)
+                @test JuliaInterpreter.hasarg(JuliaInterpreter.isidentical(QuoteNode(==)), frame.framecode.src.code) || JuliaInterpreter.hasarg(JuliaInterpreter.isidentical(GlobalRef(@__MODULE__, :(==))), frame.framecode.src.code)
                 f, pc = debug_command(frame, :n)
                 @test f === frame
                 @test isa(pc, Int)
@@ -203,6 +203,9 @@ end
         frame = JuliaInterpreter.enter_call(f, 2; b = 4)
         fr = JuliaInterpreter.maybe_step_through_wrapper!(frame)
         fr, pc = debug_command(fr, :nc)
+        if !isa(pc_expr(fr, pc), Core.ReturnNode)   # Julia 1.12 has an extra step for global lookup
+            fr, pc = debug_command(fr, :nc)
+        end
         debug_command(fr, :nc)
         @test get_return(frame) == 6
     end
@@ -272,7 +275,7 @@ end
         frame = fr = JuliaInterpreter.enter_call(f_va_outer, 1)
         # depending on whether this is in or out of a @testset, the first statement may differ
         stmt1 = fr.framecode.src.code[1]
-        if isexpr(stmt1, :call) && @lookup(frame, stmt1.args[1]) === getfield
+        if isexpr(stmt1, :call) && JuliaInterpreter.lookup(frame, stmt1.args[1]) === getfield
             fr, pc = debug_command(fr, :se)
         end
         fr, pc = debug_command(fr, :s)
@@ -333,7 +336,7 @@ end
         try
             break_on(:error)
             fr = JuliaInterpreter.enter_call(f_outer)
-            fr, pc = debug_command(JuliaInterpreter.finish_and_return!, fr, :finish)
+            fr, pc = debug_command(fr, :finish)
             @test fr.framecode.scope.name === :error
 
             fundef() = undef_func()
@@ -395,6 +398,9 @@ end
     @testset "invokelatest" begin
         fr = JuliaInterpreter.enter_call(f_inv_latest, 2.0)
         fr, pc = JuliaInterpreter.debug_command(fr, :nc)
+        while is_getproperty(pc_expr(fr, pc).args[1])    # Julia 1.12 has more steps for global lookup
+            fr, pc = JuliaInterpreter.debug_command(fr, :nc)
+        end
         frame, pc = JuliaInterpreter.debug_command(fr, :s) # step into invokelatest
         @test frame.framecode.scope.sig == Tuple{typeof(f_inv),Real}
         JuliaInterpreter.debug_command(frame, :c)
@@ -426,10 +432,13 @@ end
 
         frame = JuliaInterpreter.enter_call(sort, a)
         frame = stepkw!(frame)
-        @test frame.pc == JuliaInterpreter.nstatements(frame.framecode) - 1 broken=VERSION≥v"1.11-"
+        @test frame.pc == JuliaInterpreter.nstatements(frame.framecode) - 1
 
         frame, pc = debug_command(frame, :s)
         frame, pc = debug_command(frame, :se)  # get past copymutable
+        if JuliaInterpreter.isbindingresolved_deprecated
+            frame, pc = debug_command(frame, :se)  # there's an extra line for the GlobalRef
+        end
         frame = stepkw!(frame)
         @test frame.pc > 4
 
@@ -437,6 +446,9 @@ end
         frame, pc = debug_command(frame, :se)
         frame, pc = debug_command(frame, :s)
         frame, pc = debug_command(frame, :se)  # get past copymutable
+        if JuliaInterpreter.isbindingresolved_deprecated
+            frame, pc = debug_command(frame, :se)  # there's an extra line for the GlobalRef
+        end
         frame = stepkw!(frame)
         @test frame.pc == JuliaInterpreter.nstatements(frame.framecode) - 1
     end
@@ -450,7 +462,7 @@ end
         frame = JuliaInterpreter.enter_call(f, 2, 3) # at sin
         frame, pc = debug_command(frame, :n)
         # Check that we are at the kw call to g
-        @test Core.kwfunc(g) == JuliaInterpreter.@lookup frame JuliaInterpreter.pc_expr(frame).args[1]
+        @test Core.kwfunc(g) == JuliaInterpreter.lookup(frame, JuliaInterpreter.pc_expr(frame).args[1])
         # Step into the inner g
         frame, pc = debug_command(frame, :s)
         # Finish the frame and make sure we step out of the wrapper
@@ -465,7 +477,7 @@ end
         frame = JuliaInterpreter.enter_call(h_1, 2, 1)
         frame, pc = debug_command(frame, :s)
         # Should have skipped the kwprep in h_2 and be at call to kwfunc h_3
-        @test Core.kwfunc(h_3) == JuliaInterpreter.@lookup frame JuliaInterpreter.pc_expr(frame).args[1]
+        @test Core.kwfunc(h_3) == JuliaInterpreter.lookup(frame, JuliaInterpreter.pc_expr(frame).args[1])
     end
 
     @testset "si should not step through wrappers or kwprep" begin

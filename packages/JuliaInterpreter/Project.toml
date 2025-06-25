@@ -1,6 +1,7 @@
 name = "JuliaInterpreter"
 uuid = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
-version = "0.9.38"
+version = "0.10.3"
+authors = ["Tim Holy <tim.holy@gmail.com>, Kristoffer Carlsson <kcarlsson89@gmail.com>, Shuhei Kadowaki <aviatesk@gmail.com> and contributors"]
 
 [deps]
 CodeTracking = "da1fd8a2-8d9e-5ec2-8556-3022fb5608a2"
@@ -9,7 +10,7 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
-CodeTracking = "0.5.9, 1"
+CodeTracking = "1.3.9"
 julia = "1.10"
 
 [extras]
@@ -27,8 +28,7 @@ Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
 PyCall = "438e738f-606a-5dbb-bf0a-cddfbfd45ab0"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
-Tensors = "48a634ad-e948-5137-8d70-aa71f2a747f4"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["CassetteOverlay", "DataFrames", "Dates", "DeepDiffs", "Distributed", "FunctionWrappers", "HTTP", "LinearAlgebra", "Logging", "LoopVectorization", "Mmap", "PyCall", "SHA", "SparseArrays", "Tensors", "Test"]
+test = ["CassetteOverlay", "DataFrames", "Dates", "DeepDiffs", "Distributed", "FunctionWrappers", "HTTP", "LinearAlgebra", "Logging", "LoopVectorization", "Mmap", "PyCall", "SHA", "SparseArrays", "Test"]

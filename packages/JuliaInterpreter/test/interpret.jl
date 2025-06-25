@@ -2,8 +2,9 @@ using JuliaInterpreter
 using Test, InteractiveUtils, CodeTracking
 using Mmap
 using LinearAlgebra
+using JuliaInterpreter: isdefinedglobal
 
-if !isdefined(@__MODULE__, :runframe)
+if !isdefinedglobal(@__MODULE__, :runframe)
     include("utils.jl")
 end
 
@@ -258,7 +259,7 @@ end
 
 # llvmcall
 function add1234(x::Tuple{Int32,Int32,Int32,Int32})
-    Base.llvmcall("""%3 = extractvalue [4 x i32] %0, 0
+    Core.Intrinsics.llvmcall("""%3 = extractvalue [4 x i32] %0, 0
       %4 = extractvalue [4 x i32] %0, 1
       %5 = extractvalue [4 x i32] %0, 2
       %6 = extractvalue [4 x i32] %0, 3
@@ -360,25 +361,24 @@ f113(;x) = x
     frame = JuliaInterpreter.enter_call(f_multi, 1)
     nlocals = length(frame.framedata.locals)
     @test_throws UndefVarError JuliaInterpreter.lookup_var(frame, JuliaInterpreter.SlotNumber(nlocals))
-    stack = [frame]
     locals = JuliaInterpreter.locals(frame)
     @test length(locals) == 2
     @test JuliaInterpreter.Variable(1, :x, false) in locals
-    JuliaInterpreter.step_expr!(stack, frame)
-    JuliaInterpreter.step_expr!(stack, frame)
+    JuliaInterpreter.step_expr!(frame)
+    JuliaInterpreter.step_expr!(frame)
     @static if VERSION >= v"1.11-"
         locals = JuliaInterpreter.locals(frame)
         @test length(locals) == 2
-        JuliaInterpreter.step_expr!(stack, frame)
+        JuliaInterpreter.step_expr!(frame)
     end
     locals = JuliaInterpreter.locals(frame)
     @test length(locals) == 3
     @test JuliaInterpreter.Variable(1, :c, false) in locals
-    JuliaInterpreter.step_expr!(stack, frame)
+    JuliaInterpreter.step_expr!(frame)
     locals = JuliaInterpreter.locals(frame)
     @test length(locals) == 3
     @test JuliaInterpreter.Variable(2, :x, false) in locals
-    JuliaInterpreter.step_expr!(stack, frame)
+    JuliaInterpreter.step_expr!(frame)
     locals = JuliaInterpreter.locals(frame)
     @test length(locals) == 3
     @test JuliaInterpreter.Variable(3, :x, false) in locals
@@ -413,11 +413,16 @@ end
     f_gf(x) = false ? some_undef_var_zzzzzzz : x
     @test @interpret f_gf(2) == 2
 
-    function g_gf()
-        eval(:(z = 2))
-        return z
+    gvar = gensym()
+    @eval function g_gf()
+        @eval $gvar = 2
+        return $gvar
     end
-    @test @interpret g_gf() == 2
+    if VERSION ≥ v"1.12-"
+        @test_throws "`$gvar` not defined" @interpret(g_gf() == 2)
+    else
+        @test @interpret(g_gf() == 2)
+    end
 
     global q_gf = 0
     function h_gf()
@@ -461,13 +466,13 @@ file, line = JuliaInterpreter.whereis(fr)
 @test line == (@__LINE__() - 4)
 
 # Test path to files in stdlib
-fr = JuliaInterpreter.enter_call(Test.eval, 1)
+fr = JuliaInterpreter.enter_call(rand)
 file, line = JuliaInterpreter.whereis(fr)
 @test isfile(file)
 @static if VERSION < v"1.12.0-DEV.173"
 @test isfile(JuliaInterpreter.getfile(fr.framecode.src.linetable[1]))
 end
-@test occursin(contractuser(Sys.STDLIB), repr(fr))
+@test occursin(joinpath(contractuser(Sys.STDLIB), "Random"), repr(fr))
 
 # Test undef sparam (https://github.com/JuliaDebug/JuliaInterpreter.jl/issues/165)
 function foo(x::T) where {T <: AbstractString, S <: AbstractString}
@@ -615,15 +620,17 @@ function f_mmap()
         @test b_mmap == x
     finally
         finalize(b_mmap)
-        rm(tmp)
+        Threads.@spawn begin
+            sleep(5)
+            rm(tmp)
+        end
     end
 end
 @interpret f_mmap()
 
 # parametric llvmcall (issues #112 and #288)
 module VecTest
-    using Tensors
-    Vec{N,T} = NTuple{N,VecElement{T}}
+    const Vec{N,T} = NTuple{N,VecElement{T}}
     # The following test mimic SIMD.jl
     const _llvmtypes = Dict{DataType, String}(
         Float64 => "double",
@@ -643,7 +650,7 @@ module VecTest
             Core.getfield(Base, :llvmcall)($exp, Vec{$N, $T}, Tuple{Vec{$N, $T}, Vec{$N, $T}}, x, y)
         end
     end
-    f() = 1.0 * one(Tensor{2,3})
+    f(a) = vecadd(a, a)
 end
 let
     # NOTE we need to make sure this code block is compiled, since vecadd is generated function,
@@ -651,8 +658,8 @@ let
     Base.Experimental.@force_compile
     a = (VecElement{Float64}(1.0), VecElement{Float64}(2.0))
     @test @interpret(VecTest.vecadd(a, a)) == VecTest.vecadd(a, a)
+    @test @interpret(VecTest.f(a)) == VecTest.f(a)
 end
-@test @interpret(VecTest.f()) == [1 0 0; 0 1 0; 0 0 1]
 
 # Test exception type for undefined variables
 f_undefvar() = s = s + 1
@@ -951,6 +958,42 @@ end
 func_arrayref(a, i) = Core.arrayref(true, a, i)
 @test 2 == @interpret func_arrayref([1,2,3], 2)
 
-@static if isdefined(Base, :ScopedValues)
+@static if isdefinedglobal(Base, :ScopedValues)
 @testset "interpret_scopedvalues.jl" include("interpret_scopedvalues.jl")
+end
+
+@testset "changing interpreter for @interpret" begin
+    @test sin(42) == @interpret sin(42)
+    @test sin(42) == @interpret interp=RecursiveInterpreter() sin(42)
+    @test sin(42) == @interpret interp=NonRecursiveInterpreter() sin(42)
+    @test ((@allocated @interpret interp=RecursiveInterpreter() sin(42)) ≠ (@allocated @interpret interp=NonRecursiveInterpreter() sin(42)))
+    let interp1 = RecursiveInterpreter(),
+        interp2 = NonRecursiveInterpreter()
+        @test sin(42) == @interpret interp=interp1 sin(42)
+        @test sin(42) == @interpret interp=interp2 sin(42)
+    end
+    @test_throws "Invalid @interpret call" macroexpand(@__MODULE__, :(@interpret interp sin(42)))
+    @test_throws "Invalid @interpret call" macroexpand(@__MODULE__, :(@interpret _interp_=RecursiveInterpreter() sin(42)))
+end
+
+function func_overlay end
+func_overlay(x) = sin(x)
+call_func_overlay(x) = func_overlay(x)
+Base.Experimental.@MethodTable ex_method_table
+Base.Experimental.@overlay ex_method_table func_overlay(x) = cos(x)
+struct OverlayInterpreter <: Interpreter end
+JuliaInterpreter.method_table(::OverlayInterpreter) = ex_method_table
+
+@testset "Interpret overlay method" begin
+    let frame = JuliaInterpreter.Frame(@__MODULE__, :(func_overlay(42.0)))
+        @test JuliaInterpreter.finish_and_return!(frame, true) == sin(42.0)
+    end
+    @test sin(42.0) == @interpret call_func_overlay(42.0)
+    let frame = JuliaInterpreter.Frame(@__MODULE__, :(func_overlay(42.0)))
+        @test JuliaInterpreter.finish_and_return!(OverlayInterpreter(), frame, true) == cos(42.0)
+    end
+    let frame = JuliaInterpreter.enter_call(func_overlay, 42.0; method_table=ex_method_table)
+        @test JuliaInterpreter.finish_and_return!(OverlayInterpreter(), frame) == cos(42.0)
+    end
+    @test cos(42.0) == @interpret interp=OverlayInterpreter() call_func_overlay(42.0)
 end

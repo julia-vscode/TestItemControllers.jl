@@ -1,7 +1,7 @@
 using Base.Meta
-import Base: +, -, convert, isless, get_world_counter, mapany, ntupleany
+import Base: +, -, convert, isless, get_world_counter, mapany, ntupleany, invokelatest
 using Core: CodeInfo, SimpleVector, LineInfoNode, GotoNode, GotoIfNot, ReturnNode,
-            GeneratedFunctionStub, MethodInstance, NewvarNode, TypeName
+            GeneratedFunctionStub, MethodInstance, MethodTable, NewvarNode, TypeName
 
 using UUIDs
 using Random
@@ -10,9 +10,11 @@ using Random
 using Random.DSFMT
 using InteractiveUtils
 
-export @interpret, Compiled, Frame, root, leaf, ExprSplitter,
-       BreakpointRef, breakpoint, @breakpoint, breakpoints, enable, disable, remove, toggle,
-       debug_command, @bp, break_on, break_off, on_breakpoints_updated
+export BreakpointRef, Compiled, ExprSplitter, Frame,
+       Interpreter, NonRecursiveInterpreter, RecursiveInterpreter
+export @bp, @breakpoint, @interpret,
+       break_off, break_on, breakpoint, breakpoints, debug_command, disable, enable, leaf,
+       on_breakpoints_updated, remove, root, toggle
 
 module CompiledCalls
 # This module is for handling intrinsics that must be compiled (llvmcall) as well as ccalls
@@ -22,11 +24,17 @@ const SlotNamesType = Vector{Symbol}
 
 append_any(@nospecialize x...) = append!([], Core.svec((x...)...))
 
-@static if isdefined(Base, :ScopedValues)
+@static if !@isdefined(isdefinedglobal)
+    const isdefinedglobal = Core.isdefined
+end
+
+@static if isdefinedglobal(Base, :ScopedValues)
     using Base: ScopedValues.Scope
 else
     const Scope = Any
 end
+
+const isbindingresolved_deprecated = which(Base.isbindingresolved, Tuple{Module, Symbol}).file == Symbol("deprecated.jl")
 
 include("types.jl")
 include("utils.jl")
@@ -82,7 +90,7 @@ function set_compiled_methods()
     end
 
     # Does an atomic operation via llvmcall (this fixes #354)
-    @static if isdefined(Base, :load_state_acquire) # VERSION < v"1.12-"
+    @static if isdefinedglobal(Base, :load_state_acquire) # VERSION < v"1.12-"
     for m in methods(Base.load_state_acquire)
         push!(compiled_methods, m)
     end

@@ -22,22 +22,36 @@ end
 _Typeof(x) = isa(x, Type) ? Type{x} : typeof(x)
 
 function to_function(@nospecialize(x))
-    isa(x, GlobalRef) ? getfield(x.mod, x.name) : x
+    isa(x, GlobalRef) ? invokelatest(getfield, x.mod, x.name) : x
 end
 
 """
-    method = whichtt(tt)
+    method = whichtt(tt, mt = nothing)
 
 Like `which` except it operates on the complete tuple-type `tt`,
 and doesn't throw when there is no matching method.
 """
-function whichtt(@nospecialize(tt))
+function whichtt(@nospecialize(tt), mt::Union{Nothing,MethodTable}=nothing)
     # TODO: provide explicit control over world age? In case we ever need to call "old" methods.
-    # branch on https://github.com/JuliaLang/julia/pull/44515
-    # for now, actual code execution doesn't ever need to consider overlayed method table
-    match, _ = Core.Compiler._findsup(tt, nothing, get_world_counter())
+    # TODO Use `CachedMethodTable` for better performance once `teh/worldage` is merged
+    match, _ = findsup_mt(tt, Base.get_world_counter(), mt)
     match === nothing && return nothing
     return match.method
+end
+
+@static if VERSION ≥ v"1.12-"
+using Base.Compiler: findsup_mt
+else
+function findsup_mt(@nospecialize(tt), world, method_table)
+    if method_table === nothing
+        table = Core.Compiler.InternalMethodTable(world)
+    elseif method_table isa Core.MethodTable
+        table = Core.Compiler.OverlayMethodTable(world, method_table)
+    else
+        table = method_table
+    end
+    return Core.Compiler.findsup(tt, table)
+end
 end
 
 instantiate_type_in_env(arg, spsig::UnionAll, spvals::Vector{Any}) =
@@ -140,6 +154,14 @@ Tests whether `g` is equal to `GlobalRef(mod, name)`.
 """
 is_global_ref(@nospecialize(g), mod::Module, name::Symbol) = isa(g, GlobalRef) && g.mod === mod && g.name == name
 
+function is_global_ref_egal(@nospecialize(g), name::Symbol, @nospecialize(ref))
+    # Identifying GlobalRefs regardless of how the caller scopes them
+    isa(g, GlobalRef) || return false
+    g.name === name || return false
+    gref = getglobal(g.mod, g.name)
+    return gref === ref
+end
+
 is_quotenode(@nospecialize(q), @nospecialize(val)) = isa(q, QuoteNode) && q.value == val
 is_quotenode_egal(@nospecialize(q), @nospecialize(val)) = isa(q, QuoteNode) && q.value === val
 
@@ -168,7 +190,7 @@ is_call_or_return(@nospecialize(node)) = is_call(node) || node isa ReturnNode
 is_dummy(bpref::BreakpointRef) = bpref.stmtidx == 0 && bpref.err === nothing
 
 function unpack_splatcall(stmt)
-    if isexpr(stmt, :call) && length(stmt.args) >= 3 && is_quotenode_egal(stmt.args[1], Core._apply_iterate)
+    if isexpr(stmt, :call) && length(stmt.args) >= 3 && (is_quotenode_egal(stmt.args[1], Core._apply_iterate) || is_global_ref(stmt.args[1], Core, :_apply_iterate))
         return true, stmt.args[3]
     end
     return false, nothing
@@ -184,6 +206,8 @@ end
 function is_bodyfunc(@nospecialize(arg))
     if isa(arg, QuoteNode)
         arg = arg.value
+    elseif isa(arg, GlobalRef)
+        arg = getproperty(arg.mod, arg.name)
     end
     if isa(arg, Function)
         fname = String((typeof(arg).name::Core.TypeName).name)
@@ -259,7 +283,7 @@ function linetable(arg, i::Integer; macro_caller::Bool=false, def=:var"n/a")::Un
     # TODO: decode the linetable at this frame efficiently by reimplementing this here
     nodes = Base.IRShow.buildLineInfoNode(lt, def, i)
     isempty(nodes) && return nothing
-    return nodes[1] # ignore all inlining / macro expansion / etc :(
+    return nodes[macro_caller ? 1 : end]
     else # VERSION < v"1.12.0-DEV.173"
     lin = lt[i]::Union{Expr,LineTypes}
     if macro_caller
@@ -440,60 +464,36 @@ function statementnumbers(framecode::FrameCode, line::Integer, file::Symbol)
         0
     end
 
-    lt = linetable(framecode)
+    linetarget = line - offset
 
-    # Check if the exact line number exist
-    idxs = findall(entry::Union{LineInfoNode,LineNumberNode} -> entry.line + offset == line && entry.file == file, lt)
-    locs = codelocs(framecode)
-    if !isempty(idxs)
-        stmtidxs = Int[]
-        stmtidx = 1
-        while stmtidx <= length(locs)
-            loc = locs[stmtidx]
-            if loc in idxs
-                push!(stmtidxs, stmtidx)
-                stmtidx += 1
-                # Skip continous statements that are on the same line
-                while stmtidx <= length(locs) && loc == locs[stmtidx]
-                    stmtidx += 1
-                end
-            else
-                stmtidx += 1
-            end
-        end
-        return stmtidxs
+    lts = CodeTracking.linetable_scopes(framecode.src, scope)
+    for lt in lts
+        filter!(l -> l.file === file, lt) # filter out line scopes that do not match the file we are looking for
     end
 
-    # If the exact line number does not exist in the line table, take the one that is closest after that line
-    # restricted to the line range of the current scope.
-    scope = framecode.scope
-    range = (scope isa Method && !is_generated(scope)) ? compute_corrected_linerange(scope) : compute_linerange(framecode)
-    if line in range
-        closest = nothing
-        closest_idx = nothing
-        for (i, entry) in enumerate(lt)
-            entry = entry::Union{LineInfoNode,LineNumberNode}
-            if entry.file == file && entry.line in range && entry.line >= line
-                if closest === nothing
-                    closest = entry
-                    closest_idx = i
-                else
-                    if entry.line < closest.line
-                        closest = entry
-                        closest_idx = i
-                    end
-                end
-            end
+    stmtidxs = Int[] # will store the statement indices that match the line
+    first_in_block, block_recorded = nothing, false
+    for (i, lt) in enumerate(lts)
+        # If someone asks for a breakpoint on, e.g., `end`, there may not be a line that matches exactly.
+        # In this case, we should make sure that the scope encompasses the requested line and then return the first statement index
+        # immediately after.
+        if isempty(lt)
+            first_in_block = nothing   # start new block
+            continue
         end
-        if closest_idx !== nothing
-            idx = let closest_idx=closest_idx    # julia #15276
-                findfirst(i-> i==closest_idx, locs)
+        thisscope = first(lt)
+        if first_in_block === nothing && !iszero(thisscope.line)
+            first_in_block, block_recorded = thisscope.line, false
+        end
+        if !block_recorded   # only record the first match in a contiguous block
+            # if it's either an exact match or it's the first larger line in a block that spans the requested line, store it
+            if thisscope.line == linetarget || (thisscope.line > linetarget && something(first_in_block, typemax(typeof(thisscope.line))) < linetarget)
+                push!(stmtidxs, i)
+                block_recorded = true
             end
-            return idx === nothing ? nothing : Int[idx]
         end
     end
-
-    return nothing
+    return stmtidxs
 end
 
 ## Printing
@@ -514,7 +514,15 @@ function framecode_lines(src::CodeInfo)
     line_info_postprinter = Base.IRShow.default_expr_type_printer
     bb_idx = 1
     for idx = 1:length(src.code)
-        bb_idx = Base.IRShow.show_ir_stmt(io, src, idx, line_info_preprinter, line_info_postprinter, used, cfg, bb_idx)
+        @static if VERSION >= v"1.12.0-DEV.1359"
+            parent = src.parent
+            sptypes = if parent isa MethodInstance
+                Core.Compiler.sptypes_from_meth_instance(parent)
+            else Core.Compiler.EMPTY_SPTYPES end
+            bb_idx = Base.IRShow.show_ir_stmt(io, src, idx, line_info_preprinter, line_info_postprinter, sptypes, used, cfg, bb_idx)
+        else
+            bb_idx = Base.IRShow.show_ir_stmt(io, src, idx, line_info_preprinter, line_info_postprinter, used, cfg, bb_idx)
+        end
         push!(lines, chomp(String(take!(buf))))
     end
     return lines
@@ -814,9 +822,9 @@ function Base.display_error(io::IO, er, frame::Frame)
     println(io)
 end
 
-function static_eval(ex)
+function static_eval(evalmod, ex)
     try
-        eval(ex)
+        Core.eval(evalmod, ex)
     catch
         nothing
     end
