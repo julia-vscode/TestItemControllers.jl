@@ -111,7 +111,15 @@ function is_func_expr(@nospecialize(ex), meth::Method)
                         end
                     end
                     found && break
+                    if isexpr(whereex, :(::))
+                        typeex = whereex.args[end]
+                        if isexpr(typeex, :curly) && typeex.args[1] === :Type
+                            fname = typeex.args[2]
+                            break
+                        end
+                    end
                     whereex = whereex.args[1]
+                    isa(whereex, Expr) || return false
                 end
             end
             # match the function name
@@ -171,7 +179,7 @@ function linerange(def::Expr)
 end
 linerange(arg) = linerange(convert(Expr, arg))  # Handle Revise's RelocatableExpr
 
-function findline(ex, order)
+function findline(ex::Expr, order)
     ex.head === :line && return ex.args[1], true
     for a in order(ex.args)
         a isa LineNumberNode && return a.line, true
@@ -185,6 +193,55 @@ end
 
 fileline(lin::LineInfoNode)   = String(lin.file), lin.line
 fileline(lnn::LineNumberNode) = String(lnn.file), lnn.line
+
+if VERSION ≥ v"1.12.0-DEV.173"   # https://github.com/JuliaLang/julia/pull/52415
+    function linetable_scopes(src::Core.CodeInfo, m)
+        lts = [Vector{Base.Compiler.IRShow.LineInfoNode}() for _ = eachindex(src.code)]
+        for pc = eachindex(src.code)
+            Base.IRShow.append_scopes!(lts[pc], pc, src.debuginfo, m)
+        end
+        return lts
+    end
+else
+    function linetable_scopes(src::Core.CodeInfo, _)
+        lt, cl = src.linetable, src.codelocs
+        lts = [Vector{Core.LineInfoNode}() for _ = eachindex(src.code)]
+        for pc = eachindex(src.code)
+            iszero(cl[pc]) && continue
+            scope = lts[pc]
+            push!(scope, lt[cl[pc]])
+            while (k = last(scope).inlined_at) != Int32(0)
+                push!(scope, lt[k])
+            end
+            if length(scope) > 1
+                reverse!(scope)
+            end
+        end
+        return lts
+    end
+end
+
+"""
+    scopes = linetable_scopes(m::Method)
+
+Return an array of "scopes" for each statement in the lowered code for `m`. If
+`src = Base.uncompressed_ast(m)`, then `scopes[pc]` is an vector of
+`LineInfoNode` objects that represent the scopes active at the statement at
+position `pc` in `src.code`.
+
+`scopes[pc]` may have length larger than 1, where the first entry is for the
+source location in `m`, and any later entries reflect code from inlining.
+
+The precise type of these entries varies with Julia version,
+`Base.Compiler.IRShow.LineInfoNode` objects on Julia 1.12 and up, and
+`Core.LineInfoNode` objects on earlier versions. These objects differ in some of
+their fields. `:method`, `:file`, and `:line` are common to both types.
+"""
+linetable_scopes(m::Method) = linetable_scopes(Base.uncompressed_ast(m), m)
+
+getmethod(m::Method) = m
+getmethod(mi::Core.MethodInstance) = getmethod(mi.def)
+getmethod(ci::Core.CodeInstance) = getmethod(ci.def)
 
 # This regex matches the pseudo-file name of a REPL history entry.
 const rREPL = r"^REPL\[(\d+)\]$"
@@ -201,10 +258,10 @@ function strip_gensym(str::AbstractString)
     if startswith(str, '#')
         idx = findnext('#', str, 2)
         if idx !== nothing
-            return Symbol(str[2:idx-1])
+            return Symbol(str[2:prevind(str, idx)])
         end
     end
-    endswith(str, "##kw") && return Symbol(str[1:end-4])
+    endswith(str, "##kw") && return Symbol(str[1:prevind(str, end-3)])
     return Symbol(str)
 end
 
