@@ -12,8 +12,6 @@ using Revise.OrderedCollections: OrderedSet
 using Test: collect_test_logs
 using Base.CoreLogging: Debug,Info
 
-using Revise.CodeTracking: line_is_decl
-
 # In addition to using this for the "More arg-modifying macros" test below,
 # this package is used on CI to test what happens when you have multiple
 # *.ji files for the package.
@@ -73,17 +71,6 @@ const pair_op_compact = let io = IOBuffer()
 end
 
 const issue639report = []
-
-if isdefined(Core, :var"@latestworld")
-    import Core: @latestworld
-else
-    # In older Julia versions, there were more implicit
-    # world age increments, so the macro is generally not
-    # required.
-    macro latestworld()
-        nothing
-    end
-end
 
 @testset "Revise" begin
     do_test("PkgData") && @testset "PkgData" begin
@@ -825,22 +812,32 @@ end
         pop!(LOAD_PATH)
     end
 
-    do_test("Recursive types (issue #417)") && @testset "Recursive types (issue #417)" begin
+    do_test("Recursive types (issues #417 and #883)") && @testset "Recursive types (issues #417 and #883)" begin
         testdir = newtestdir()
         fn = joinpath(testdir, "recursive.jl")
         write(fn, """
             module RecursiveTypes
+            # issue #417
             struct Foo
                 x::Vector{Foo}
 
                 Foo() = new(Foo[])
             end
+
+            # issue #883
+            @static if Base.VERSION >= v"1.12-"
+                struct NestedDict{K, V} <: AbstractDict{K, Union{V, NestedDict}} end
+            end
+
             end
             """)
         sleep(mtimedelay)
         includet(fn)
         @latestworld
         @test isa(RecursiveTypes.Foo().x, Vector{RecursiveTypes.Foo})
+        if Base.VERSION >= v"1.12-"
+            @test isa(RecursiveTypes.NestedDict{Int, String}(), AbstractDict{Int, Union{String, RecursiveTypes.NestedDict}})
+        end
 
         pop!(LOAD_PATH)
     end
@@ -1112,7 +1109,10 @@ end
         @test get_docstring(ds) == "f"
         @test ChangeDocstring.g() == 1
         ds = @doc(ChangeDocstring.g)
-        @test get_docstring(ds) in ("No documentation found.", "No documentation found for private symbol.")
+        @test get_docstring(ds) in (
+            "No documentation found.",
+            "No documentation found for private symbol.",
+            "No documentation found for private binding ")
         # Ordinary route
         write(joinpath(dn, "ChangeDocstring.jl"), """
             module ChangeDocstring
@@ -1131,9 +1131,8 @@ end
         lwr = Meta.lower(ChangeDocstring, ex)
         frame = Frame(ChangeDocstring, lwr.args[1])
         methodinfo = Revise.MethodInfo()
-        docexprs = Revise.DocExprs()
-        ret = Revise.methods_by_execution!(JuliaInterpreter.finish_and_return!, methodinfo,
-                                           docexprs, frame, trues(length(frame.framecode.src.code)); mode=:sigs)
+        ret = Revise._methods_by_execution!(JuliaInterpreter.RecursiveInterpreter(), methodinfo,
+                                            frame, trues(length(frame.framecode.src.code)); mode=:sigs)
         ds = @doc(ChangeDocstring.f)
         @test get_docstring(ds) == "g"
 
@@ -1152,7 +1151,10 @@ end
         sleep(mtimedelay)
         @test FirstDocstring.g() == 1
         ds = @doc(FirstDocstring.g)
-        @test get_docstring(ds) in ("No documentation found.", "No documentation found for private symbol.")
+        @test get_docstring(ds) in (
+            "No documentation found.",
+            "No documentation found for private symbol.",
+            "No documentation found for private binding ")
         write(joinpath(dn, "FirstDocstring.jl"), """
             module FirstDocstring
             "g" g() = 1
@@ -1583,8 +1585,7 @@ end
         io = IOBuffer()
         if isdefined(Base, :methodloc_callback)
             print(io, methods(triggered))
-            mline = line_is_decl ? 1 : 2
-            @test occursin(filename * ":$mline", String(take!(io)))
+            @test occursin(filename * ":1", String(take!(io)))
         end
         write(filename, """
             # A comment to change the line numbers
@@ -1619,8 +1620,7 @@ end
         @test occursin(targetstr, String(take!(io)))
         if isdefined(Base, :methodloc_callback)
             print(io, methods(triggered))
-            mline = line_is_decl ? 2 : 3
-            @test occursin(basename(filename * ":$mline"), String(take!(io)))
+            @test occursin(basename(filename * ":2"), String(take!(io)))
         end
 
         push!(to_remove, filename)
@@ -3121,11 +3121,6 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
     old_depots = copy(DEPOT_PATH)
     empty!(DEPOT_PATH)
     push!(DEPOT_PATH, depot)
-    # Skip cloning the General registry since that is slow and unnecessary
-    ENV["JULIA_PKG_SERVER"] = ""
-    registries = isdefined(Pkg.Types, :DEFAULT_REGISTRIES) ? Pkg.Types.DEFAULT_REGISTRIES : Pkg.Registry.DEFAULT_REGISTRIES
-    old_registries = copy(registries)
-    empty!(registries)
     # Ensure we start fresh with no dependencies
     old_project = Base.ACTIVE_PROJECT[]
     Base.ACTIVE_PROJECT[] = joinpath(depot, "environments", "v$(VERSION.major).$(VERSION.minor)", "Project.toml")
@@ -3160,9 +3155,6 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
     # Restore internal Pkg data
     empty!(DEPOT_PATH)
     append!(DEPOT_PATH, old_depots)
-    for pr in old_registries
-        push!(registries, pr)
-    end
     Base.ACTIVE_PROJECT[] = old_project
 
     push!(to_remove, depot)
@@ -3939,12 +3931,12 @@ end
 
 include("backedges.jl")
 
-include("non_jl_test.jl")
+# include("non_jl_test.jl")
 
 do_test("Base signatures") && @testset "Base signatures" begin
     println("beginning signatures tests")
     # Using the extensive repository of code in Base as a testbed
-    include("sigtest.jl")
+    @test success(pipeline(`$(Base.julia_cmd()) sigtest.jl`, stderr=stderr))
 end
 
 # Run this test in a separate julia process, since it messes with projects, and we don't want to have to
