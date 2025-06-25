@@ -5,7 +5,7 @@ const StoreType{T} = Union{Tuple{Vararg{T}}, AbstractVector{T}}
 end
 
 """
-    LittleDict(keys, vals)<:AbstractDict
+    LittleDict(keys, vals) <: AbstractDict
 
 An ordered dictionary type for small numbers of keys.
 Rather than using `hash` or some other sophisticated measure
@@ -45,6 +45,7 @@ struct LittleDict{K, V, KS<:StoreType{K}, VS<:StoreType{V}} <: AbstractDict{K, V
     LittleDict{K, V, <:Tuple, <:Tuple}() where {K, V} = new{K, V, Tuple{}, Tuple{}}((), ())
     LittleDict{K, V, KS, VS}() where {K, V, KS, VS} = LittleDict{K, V, KS, VS}(KS(), VS())
 end
+LittleDict{K, V, KS, VS}(d::AbstractDict) where {K, V, KS<:StoreType{K}, VS<:StoreType{V}} = LittleDict{K, V, KS, VS}(collect(keys(d)), collect(values(d)))
 
 function LittleDict{K,V}(ks::KS, vs::VS) where {K,V, KS<:StoreType,VS<:StoreType}
     return LittleDict{K, V, KS, VS}(ks, vs)
@@ -57,11 +58,11 @@ end
 # Other iterators should be copied to a Vector
 LittleDict(ks, vs) = LittleDict(collect(ks), collect(vs))
 
-function LittleDict{K,V}(itr) where {K,V}
+function LittleDict{K, V}(itr) where {K,V}
     ks = K[]
     vs = V[]
     for val in itr
-        if !(val isa Union{Tuple{<:Any, <:Any}, Pair})
+        if !(val isa Union{Tuple{Any, Any}, Pair})
             throw(ArgumentError(
                 "LittleDict(kv): kv needs to be an iterator of tuples or pairs")
             )
@@ -132,7 +133,6 @@ function Base.map!(f, iter::Base.ValueIterator{<:LittleDict})
     return iter
 end
 
-struct NotFoundSentinel end  # Struct to mark not not found
 function Base.get(dd::LittleDict, key, default)
     @assert length(dd.keys) == length(dd.vals)
     for ii in 1:length(dd.keys)
