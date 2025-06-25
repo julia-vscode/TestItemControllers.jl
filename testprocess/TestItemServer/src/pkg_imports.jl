@@ -36,17 +36,29 @@ module JuliaInterpreter
 end
 
 module LoweredCodeUtils
-    using ..JuliaInterpreter
-    using ..JuliaInterpreter: SSAValue, SlotNumber, Frame
-    using ..JuliaInterpreter: @lookup, moduleof, pc_expr, step_expr!, is_global_ref, is_quotenode_egal, whichtt,
-        next_until!, finish_and_return!, get_return, nstatements, codelocation, linetable,
-        is_return, lookup_return
-
     @static if VERSION >= v"1.10.0"
+        using ..JuliaInterpreter
+        using ..JuliaInterpreter: SSAValue, SlotNumber, Frame, Interpreter, RecursiveInterpreter
+        using ..JuliaInterpreter: codelocation, is_global_ref, is_global_ref_egal, is_quotenode_egal, is_return,
+            lookup, lookup_return, linetable, moduleof, next_until!, nstatements, pc_expr,
+            step_expr!, whichtt
+
         include("../../../packages/LoweredCodeUtils/src/packagedef.jl")
     elseif VERSION >= v"1.6.0"
+        using ..JuliaInterpreter
+        using ..JuliaInterpreter: SSAValue, SlotNumber, Frame
+        using ..JuliaInterpreter: @lookup, moduleof, pc_expr, step_expr!, is_global_ref, is_quotenode_egal, whichtt,
+            next_until!, finish_and_return!, get_return, nstatements, codelocation, linetable,
+            is_return, lookup_return
+
         include("../../../packages-old/v1.9/LoweredCodeUtils/src/packagedef.jl")
     else
+        using ..JuliaInterpreter
+        using ..JuliaInterpreter: SSAValue, SlotNumber, Frame
+        using ..JuliaInterpreter: @lookup, moduleof, pc_expr, step_expr!, is_global_ref, is_quotenode, whichtt,
+            next_until!, finish_and_return!, get_return, nstatements, codelocation, linetable,
+            is_return, lookup_return, is_GotoIfNot, is_ReturnNode
+
         include("../../../packages-old/v1.5/LoweredCodeUtils/src/packagedef.jl")
     end
 end
