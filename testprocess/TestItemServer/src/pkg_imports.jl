@@ -14,7 +14,6 @@ elseif VERSION >= v"1.6.0"
         include("../../../packages-old/v1.5/CodeTracking/src/CodeTracking.jl")
     end
 include("../../../packages/CoverageTools/src/CoverageTools.jl")
-include("../../../packages/IOCapture/src/IOCapture.jl")
 include("../../../packages/CancellationTokens/src/CancellationTokens.jl")
 
 module JSONRPC
