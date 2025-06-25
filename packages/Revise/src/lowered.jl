@@ -1,27 +1,19 @@
 ## Analyzing lowered code
 
-function add_docexpr!(docexprs::AbstractDict{Module,V}, mod::Module, ex) where V
-    docexs = get(docexprs, mod, nothing)
-    if docexs === nothing
-        docexs = docexprs[mod] = V()
-    end
-    push!(docexs, ex)
-    return docexprs
-end
-
 function assign_this!(frame, value)
     frame.framedata.ssavalues[frame.pc] = value
 end
+
+# TODO Define abstract type MethodInfo end
 
 # This defines the API needed to store signatures using methods_by_execution!
 # This default version is simple and only used for testing purposes.
 # The "real" one is CodeTrackingMethodInfo in Revise.jl.
 const MethodInfo = IdDict{Type,LineNumberNode}
-add_signature!(methodinfo::MethodInfo, @nospecialize(sig), ln) = push!(methodinfo, sig=>ln)
-push_expr!(methodinfo::MethodInfo, mod::Module, ex::Expr) = methodinfo
-pop_expr!(methodinfo::MethodInfo) = methodinfo
-add_dependencies!(methodinfo::MethodInfo, be::CodeEdges, src, isrequired) = methodinfo
-add_includes!(methodinfo::MethodInfo, mod::Module, filename) = methodinfo
+add_signature!(methodinfo, @nospecialize(sig), ln) = push!(methodinfo, sig=>ln)
+push_expr!(methodinfo, mod::Module, ex::Expr) = methodinfo
+pop_expr!(methodinfo) = methodinfo
+add_includes!(methodinfo, mod::Module, filename) = methodinfo
 
 function is_some_include(@nospecialize(f))
     @assert !isa(f, Core.SSAValue) && !isa(f, JuliaInterpreter.SSAValue)
@@ -44,8 +36,16 @@ function is_some_include(@nospecialize(f))
     return false
 end
 
+function is_defaultctors(@nospecialize(f))
+    @assert !isa(f, Core.SSAValue) && !isa(f, JuliaInterpreter.SSAValue)
+    if isa(f, GlobalRef)
+        return f.mod === Core && f.name === :_defaultctors
+    end
+    return false
+end
+
 # This is not generally used, see `is_method_or_eval` instead
-function hastrackedexpr(stmt, code; heads=LoweredCodeUtils.trackedheads)
+function hastrackedexpr(@nospecialize(stmt), code)
     haseval = false
     if isa(stmt, Expr)
         haseval = matches_eval(stmt)
@@ -59,8 +59,8 @@ function hastrackedexpr(stmt, code; heads=LoweredCodeUtils.trackedheads)
             is_some_include(f) && return true, haseval
         elseif stmt.head === :thunk
             newcode = (stmt.args[1]::Core.CodeInfo).code
-            any(s->any(hastrackedexpr(s, newcode; heads=heads)), newcode) && return true, haseval
-        elseif stmt.head ∈ heads
+            any(s->any(hastrackedexpr(s, newcode)), newcode) && return true, haseval
+        elseif stmt.head === :method
             return true, haseval
         end
     end
@@ -89,6 +89,7 @@ function categorize_stmt(@nospecialize(stmt), code::Vector{Any})
                 callee = code[callee.id]
             end
             isinclude = is_some_include(callee)
+            ismeth = is_defaultctors(callee)
         end
     end
     return ismeth, haseval, isinclude, isnamespace, istoplevel
@@ -136,8 +137,8 @@ function minimal_evaluation!(@nospecialize(predicate), methodinfo, mod::Module, 
                 name = GlobalRef(mod, name)
             end
             namedconstassigned[name::GlobalRef] = false
-        elseif LoweredCodeUtils.is_assignment_like(stmt)
-            lhs = (stmt::Expr).args[1]
+        elseif (lhs_rhs = LoweredCodeUtils.get_lhs_rhs(stmt); lhs_rhs !== nothing)
+            lhs, _ = lhs_rhs
             if isa(lhs, Symbol)
                 lhs = GlobalRef(mod, lhs)
             end
@@ -174,14 +175,13 @@ function minimal_evaluation!(@nospecialize(predicate), methodinfo, mod::Module, 
     lines_required!(isrequired, src, edges;)
                     # norequire=mode===:sigs ? LoweredCodeUtils.exclude_named_typedefs(src, edges) : ())
     # LoweredCodeUtils.print_with_code(stdout, src, isrequired)
-    add_dependencies!(methodinfo, edges, src, isrequired)
     return isrequired, evalassign
 end
-@noinline minimal_evaluation!(@nospecialize(predicate), methodinfo, frame::JuliaInterpreter.Frame, mode::Symbol) =
+@noinline minimal_evaluation!(@nospecialize(predicate), methodinfo, frame::Frame, mode::Symbol) =
     minimal_evaluation!(predicate, methodinfo, moduleof(frame), frame.framecode.src, mode)
 
-function minimal_evaluation!(methodinfo, frame::JuliaInterpreter.Frame, mode::Symbol)
-    minimal_evaluation!(methodinfo, frame, mode) do @nospecialize(stmt), code
+function minimal_evaluation!(methodinfo, frame::Frame, mode::Symbol)
+    minimal_evaluation!(methodinfo, frame, mode) do @nospecialize(stmt), code::Vector{Any}
         ismeth, haseval, isinclude, isnamespace, istoplevel = categorize_stmt(stmt, code)
         isreq = ismeth | isinclude | istoplevel
         return mode === :sigs ? (isreq, haseval) : (isreq | isnamespace, haseval)
@@ -190,34 +190,32 @@ end
 
 function methods_by_execution(mod::Module, ex::Expr; kwargs...)
     methodinfo = MethodInfo()
-    docexprs = DocExprs()
-    value, frame = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, docexprs, mod, ex; kwargs...)
-    return methodinfo, docexprs, frame
+    value, thk = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, mod, ex; kwargs...)
+    return methodinfo, thk
 end
 
 """
-    methods_by_execution!(recurse=JuliaInterpreter.Compiled(), methodinfo, docexprs, mod::Module, ex::Expr;
+    methods_by_execution!([interp::Interpreter=JuliaInterpreter.Compiled(),] methodinfo, mod::Module, ex::Expr;
                           mode=:eval, disablebp=true, skip_include=mode!==:eval, always_rethrow=false)
 
 Evaluate or analyze `ex` in the context of `mod`.
 Depending on the setting of `mode` (see the Extended help), it supports full evaluation or just the minimal
 evaluation needed to extract method signatures.
-`recurse` controls JuliaInterpreter's evaluation of any non-intercepted statement;
-likely choices are `JuliaInterpreter.Compiled()` or `JuliaInterpreter.finish_and_return!`.
+`interp` controls JuliaInterpreter's evaluation of any non-intercepted statement;
+likely choices are `JuliaInterpreter.Compiled()` or `JuliaInterpreter.RecursiveInterpreter()`.
 `methodinfo` is a cache for storing information about any method definitions (see [`CodeTrackingMethodInfo`](@ref)).
-`docexprs` is a cache for storing documentation expressions; obtain an empty one with `Revise.DocExprs()`.
 
 # Extended help
 
 The action depends on `mode`:
 
-- `:eval` evaluates the expression in `mod`, similar to `Core.eval(mod, ex)` except that `methodinfo` and `docexprs`
-  will be populated with information about any signatures or docstrings. This mode is used to implement `includet`.
-- `:sigs` analyzes `ex` and extracts signatures of methods and docstrings (specifically, statements flagged by
+- `:eval` evaluates the expression in `mod`, similar to `Core.eval(mod, ex)` except that `methodinfo`
+  will be populated with information about any signatures. This mode is used to implement `includet`.
+- `:sigs` analyzes `ex` and extracts signatures of methods (specifically, statements flagged by
   [`Revise.minimal_evaluation!`](@ref)), but does not evaluate `ex` in the traditional sense.
   It will selectively execute statements needed to form the signatures of defined methods.
   It will also expand any `@eval`ed expressions, since these might contain method definitions.
-- `:evalmeth` analyzes `ex` and extracts signatures and docstrings like `:sigs`, but takes the additional step of
+- `:evalmeth` analyzes `ex` and extracts signatures like `:sigs`, but takes the additional step of
   evaluating any `:method` statements.
 - `:evalassign` acts similarly to `:evalmeth`, and also evaluates assignment statements.
 
@@ -239,20 +237,20 @@ The other keyword arguments are more straightforward:
   If false, the error is logged with `@error`. `InterruptException`s are always rethrown.
   This is primarily useful for debugging.
 """
-function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, mod::Module, ex::Expr;
+function methods_by_execution!(interp::Interpreter, methodinfo, mod::Module, ex::Expr;
                                mode::Symbol=:eval, disablebp::Bool=true, always_rethrow::Bool=false, kwargs...)
     mode ∈ (:sigs, :eval, :evalmeth, :evalassign) || error("unsupported mode ", mode)
     lwr = Meta.lower(mod, ex)
-    isa(lwr, Expr) || return nothing, nothing
+    isa(lwr, Expr) || return Pair{Any,Union{Nothing,Expr}}(nothing, nothing)
     if lwr.head === :error || lwr.head === :incomplete
         throw(LoweringException(lwr))
     end
     if lwr.head !== :thunk
-        mode === :sigs && return nothing, nothing
-        return Core.eval(mod, lwr), nothing
+        mode === :sigs && return Pair{Any,Union{Nothing,Expr}}(nothing, nothing)
+        return Pair{Any,Union{Nothing,Expr}}(Core.eval(mod, lwr), nothing)
     end
-    frame = JuliaInterpreter.Frame(mod, lwr.args[1]::CodeInfo)
-    mode === :eval || LoweredCodeUtils.rename_framemethods!(recurse, frame)
+    frame = Frame(mod, lwr.args[1]::CodeInfo)
+    mode === :eval || LoweredCodeUtils.rename_framemethods!(interp, frame)
     # Determine whether we need interpreted mode
     isrequired, evalassign = minimal_evaluation!(methodinfo, frame, mode)
     # LoweredCodeUtils.print_with_code(stdout, frame.framecode.src, isrequired)
@@ -283,7 +281,7 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, mod
             foreach(disable, active_bp_refs)
         end
         ret = try
-            methods_by_execution!(recurse, methodinfo, docexprs, frame, isrequired; mode=mode, kwargs...)
+            _methods_by_execution!(interp, methodinfo, frame, isrequired; mode, kwargs...)
         catch err
             (always_rethrow || isa(err, InterruptException)) && (disablebp && foreach(enable, active_bp_refs); rethrow(err))
             loc = location_string(whereis(frame))
@@ -299,12 +297,13 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, mod
             foreach(enable, active_bp_refs)
         end
     end
-    return ret, lwr
+    return Pair{Any,Union{Nothing,Expr}}(ret, lwr)
 end
-methods_by_execution!(methodinfo, docexprs, mod::Module, ex::Expr; kwargs...) =
-    methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, docexprs, mod, ex; kwargs...)
+methods_by_execution!(methodinfo, mod::Module, ex::Expr; kwargs...) =
+    methods_by_execution!(Compiled(), methodinfo, mod, ex; kwargs...)
 
-function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, frame::Frame, isrequired::AbstractVector{Bool}; mode::Symbol=:eval, skip_include::Bool=true)
+function _methods_by_execution!(interp::Interpreter, methodinfo, frame::Frame, isrequired::AbstractVector{Bool};
+                                mode::Symbol=:eval, skip_include::Bool=true)
     isok(lnn::LineTypes) = !iszero(lnn.line) || lnn.file !== :none   # might fail either one, but accept anything
 
     mod = moduleof(frame)
@@ -315,7 +314,7 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
     while true
         JuliaInterpreter.is_leaf(frame) || (@warn("not a leaf"); break)
         stmt = pc_expr(frame, pc)
-        if !isrequired[pc] && mode !== :eval && !(mode === :evalassign && LoweredCodeUtils.is_assignment_like(stmt))
+        if !isrequired[pc] && mode !== :eval && !(mode === :evalassign && LoweredCodeUtils.get_lhs_rhs(stmt) !== nothing)
             pc = next_or_nothing!(frame)
             pc === nothing && break
             continue
@@ -326,7 +325,7 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                 local value
                 for ex in stmt.args
                     ex isa Expr || continue
-                    value = methods_by_execution!(recurse, methodinfo, docexprs, mod, ex; mode=mode, disablebp=false, skip_include=skip_include)
+                    value, _ = methods_by_execution!(interp, methodinfo, mod, ex; mode, disablebp=false, skip_include)
                 end
                 isassign(frame, pc) && assign_this!(frame, value)
                 pc = next_or_nothing!(frame)
@@ -338,10 +337,10 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
             #     # way to find them within the already-defined module.
             #     # They may be needed to define later signatures.
             #     # Note that named inner methods don't require special treatment.
-            #     pc = step_expr!(recurse, frame, stmt, true)
+            #     pc = step_expr!(interp, frame, stmt, true)
             elseif head === :method
                 empty!(signatures)
-                ret = methoddef!(recurse, signatures, frame, stmt, pc; define=mode!==:sigs)
+                ret = methoddef!(interp, signatures, frame, stmt, pc; define=mode!==:sigs)
                 if ret === nothing
                     # This was just `function foo end` or similar.
                     # However, it might have been followed by a thunk that defined a
@@ -356,23 +355,23 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                             end
                         end
                     end
-                    pc = next_or_nothing!(frame)
+                    @assert length(stmt.args) == 1
+                    pc = mode !== :sigs ? step_expr!(interp, frame, stmt, true) :
+                        next_or_nothing!(frame)
                 else
                     pc, pc3 = ret
                     # Get the line number from the body
                     stmt3 = pc_expr(frame, pc3)::Expr
                     lnn = nothing
-                    if line_is_decl
-                        sigcode = @lookup(frame, stmt3.args[2])::Core.SimpleVector
-                        lnn = sigcode[end]
-                        if !isa(lnn, LineNumberNode)
-                            lnn = nothing
-                        end
+                    sigcode = lookup(interp, frame, stmt3.args[2])::Core.SimpleVector
+                    lnn = sigcode[end]
+                    if !isa(lnn, LineNumberNode)
+                        lnn = nothing
                     end
                     if lnn === nothing
                         bodycode = stmt3.args[end]
                         if !isa(bodycode, CodeInfo)
-                            bodycode = @lookup(frame, bodycode)
+                            bodycode = lookup(interp, frame, bodycode)
                         end
                         if isa(bodycode, CodeInfo)
                             lnn = linetable(bodycode, 1)
@@ -441,24 +440,51 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                         end
                     end
                 end
-            elseif LoweredCodeUtils.is_assignment_like(stmt)
-                # If we're here, either isrequired[pc] is true, or the mode forces us to eval assignments
-                pc = step_expr!(recurse, frame, stmt, true)
+            elseif LoweredCodeUtils.get_lhs_rhs(stmt) !== nothing
+                if mode === :sigs && stmt.head === :const && (a = stmt.args[1]) isa GlobalRef && @invokelatest(isdefined(mod, a.name))
+                    # avoid redefining types unless we have to
+                    pc = next_or_nothing!(frame)
+                else
+                    pc = step_expr!(interp, frame, stmt, true)
+                end
             elseif head === :call
-                f = @lookup(frame, stmt.args[1])
-                if f === Core.eval
+                f = lookup(interp, frame, stmt.args[1])
+                if isdefined(Core, :_defaultctors) && f === Core._defaultctors && length(stmt.args) == 3
+                    T = lookup(interp, frame, stmt.args[2])
+                    lnn = lookup(interp, frame, stmt.args[3])
+                    if T isa Type && lnn isa LineNumberNode
+                        empty!(signatures)
+                        uT = Base.unwrap_unionall(T)::DataType
+                        ft = uT.types
+                        sig1 = Tuple{Base.rewrap_unionall(Type{uT}, T), Any[Any for i in 1:length(ft)]...}
+                        push!(signatures, sig1)
+                        sig2 = Base.rewrap_unionall(Tuple{Type{T}, ft...}, T)
+                        while T isa UnionAll
+                            sig2 isa UnionAll || (sig2 = sig1; break) # sig2 doesn't define all parameters, so drop it
+                            T = T.body
+                        end
+                        sig1 == sig2 || push!(signatures, sig2)
+                        for sig in signatures
+                            add_signature!(methodinfo, sig, lnn)
+                        end
+                    end
+                    if mode===:sigs
+                        pc = next_or_nothing!(frame)
+                    else # also execute this call
+                        pc = step_expr!(interp, frame, stmt, true)
+                    end
+                elseif f === Core.eval
                     # an @eval or eval block: this may contain method definitions, so intercept it.
-                    evalmod = @lookup(frame, stmt.args[2])::Module
-                    evalex = @lookup(frame, stmt.args[3])
+                    evalmod = lookup(interp, frame, stmt.args[2])::Module
+                    evalex = lookup(interp, frame, stmt.args[3])
                     value = nothing
                     for (newmod, newex) in ExprSplitter(evalmod, evalex)
                         if is_doc_expr(newex)
-                            add_docexpr!(docexprs, newmod, newex)
                             newex = newex.args[4]
                         end
                         newex = unwrap(newex)
                         push_expr!(methodinfo, newmod, newex)
-                        value = methods_by_execution!(recurse, methodinfo, docexprs, newmod, newex; mode=mode, skip_include=skip_include, disablebp=false)
+                        value, _ = methods_by_execution!(interp, methodinfo, newmod, newex; mode, skip_include, disablebp=false)
                         pop_expr!(methodinfo)
                     end
                     assign_this!(frame, value)
@@ -467,9 +493,9 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                     # include calls need to be managed carefully from several standpoints, including
                     # path management and parsing new expressions
                     if length(stmt.args) == 2
-                        add_includes!(methodinfo, mod, @lookup(frame, stmt.args[2]))
+                        add_includes!(methodinfo, mod, lookup(interp, frame, stmt.args[2]))
                     elseif length(stmt.args) == 3
-                        add_includes!(methodinfo, @lookup(frame, stmt.args[2]), @lookup(frame, stmt.args[3]))
+                        add_includes!(methodinfo, lookup(interp, frame, stmt.args[2]), lookup(interp, frame, stmt.args[3]))
                     else
                         error("Bad call to Core.include")
                     end
@@ -477,11 +503,11 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                     pc = next_or_nothing!(frame)
                 elseif skip_include && f === Base.include
                     if length(stmt.args) == 2
-                        add_includes!(methodinfo, mod, @lookup(frame, stmt.args[2]))
+                        add_includes!(methodinfo, mod, lookup(interp, frame, stmt.args[2]))
                     else # either include(module, path) or include(mapexpr, path)
-                        mod_or_mapexpr = @lookup(frame, stmt.args[2])
+                        mod_or_mapexpr = lookup(interp, frame, stmt.args[2])
                         if isa(mod_or_mapexpr, Module)
-                            add_includes!(methodinfo, mod_or_mapexpr, @lookup(frame, stmt.args[3]))
+                            add_includes!(methodinfo, mod_or_mapexpr, lookup(interp, frame, stmt.args[3]))
                         else
                             error("include(mapexpr, path) is not supported") # TODO (issue #634)
                         end
@@ -489,7 +515,7 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                     assign_this!(frame, nothing)  # FIXME: the file might return something different from `nothing`
                     pc = next_or_nothing!(frame)
                 elseif f === Base.Docs.doc! # && mode !== :eval
-                    fargs = JuliaInterpreter.collect_args(recurse, frame, stmt)
+                    fargs = JuliaInterpreter.collect_args(interp, frame, stmt)
                     popfirst!(fargs)
                     length(fargs) == 3 && push!(fargs, Union{})  # add the default sig
                     dmod::Module, b::Base.Docs.Binding, str::Base.Docs.DocStr, sig = fargs
@@ -521,16 +547,16 @@ function methods_by_execution!(@nospecialize(recurse), methodinfo, docexprs, fra
                     pc = next_or_nothing!(frame)
                 else
                     # A :call Expr we don't want to intercept
-                    pc = step_expr!(recurse, frame, stmt, true)
+                    pc = step_expr!(interp, frame, stmt, true)
                 end
             else
                 # An Expr we don't want to intercept
                 frame.pc = pc
-                pc = step_expr!(recurse, frame, stmt, true)
+                pc = step_expr!(interp, frame, stmt, true)
             end
         else
             # A statement we don't want to intercept
-            pc = step_expr!(recurse, frame, stmt, true)
+            pc = step_expr!(interp, frame, stmt, true)
         end
         pc === nothing && break
     end

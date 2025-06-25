@@ -20,6 +20,7 @@ do_test("Backedges") && @testset "Backedges" begin
     laststmt = src.code[end]
     @assert isa(laststmt, Core.ReturnNode)
     to_skip = isa(laststmt.val, Revise.JuliaInterpreter.SSAValue) ? 2 : 1
+    # Revise.LoweredCodeUtils.print_with_code(stdout, src, isrequired)
     @test sum(isrequired) == length(src.code)-count(e->isexpr(e, :latestworld), src.code)-to_skip  # skips the `return` at the end (and its argument)
 
     src = """
@@ -41,12 +42,9 @@ do_test("Backedges") && @testset "Backedges" begin
     end
     """
     mexs = Revise.parse_source!(Revise.ModuleExprsSigs(BackEdgesTest), src, "backedges_test.jl", BackEdgesTest)
-    Revise.moduledeps[BackEdgesTest] = Revise.DepDict()
     Revise.instantiate_sigs!(mexs)
     @test isempty(methods(BackEdgesTest.getdiameter))
     @test !isdefined(BackEdgesTest, :planetdiameters)
-    @test length(Revise.moduledeps[BackEdgesTest]) == 1
-    @test Revise.moduledeps[BackEdgesTest][:flag] == Set([(BackEdgesTest, first(Iterators.drop(mexs[BackEdgesTest], 1))[1])])
 
     # issue #399
     src = """
