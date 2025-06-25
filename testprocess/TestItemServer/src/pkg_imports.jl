@@ -6,7 +6,13 @@ if VERSION >= v"1.6.0"
 else
     include("../../../packages-old/v1.5/OrderedCollections/src/OrderedCollections.jl")
 end
-include("../../../packages/CodeTracking/src/CodeTracking.jl")
+@static if VERSION >= v"1.10.0"
+    include("../../../packages/CodeTracking/src/CodeTracking.jl")
+elseif VERSION >= v"1.6.0"
+        include("../../../packages-old/v1.9/CodeTracking/src/CodeTracking.jl")
+    else
+        include("../../../packages-old/v1.5/CodeTracking/src/CodeTracking.jl")
+    end
 include("../../../packages/CoverageTools/src/CoverageTools.jl")
 include("../../../packages/IOCapture/src/IOCapture.jl")
 include("../../../packages/CancellationTokens/src/CancellationTokens.jl")
