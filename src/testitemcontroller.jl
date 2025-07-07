@@ -365,7 +365,6 @@ function execute_testrun(
 
     # Finally, we send error notifications for all test items that didn't have a package
     for i in test_items_without_package
-        delete!(testitem_ids, i.id)
         testitem_failed_callback(
             params.testRunId,
             i.id,
