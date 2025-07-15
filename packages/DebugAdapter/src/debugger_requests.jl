@@ -85,9 +85,8 @@ function launch_request(debug_session::DebugSession, params::JuliaLaunchArgument
         file_content = try
             read(filename_to_debug, String)
         catch err
-            # TODO Think about some way to return an error message in the UI
-            put!(debug_session.next_cmd, (cmd=:stop,))
-            return LaunchResponseArguments()
+            put!(debug_session.next_cmd, (cmd=:terminate,))
+            return DAPError("Debugger failed to read the file `$filename_to_debug`.\n\n$(sprint(showerror, err))")
         end
 
         if params.compiledModulesOrFunctions !== missing
@@ -397,7 +396,7 @@ function stack_trace_request(debug_session::DebugSession, params::StackTraceArgu
                 JuliaInterpreter.replace_coretypes!(src; rev = true)
                 code = Base.invokelatest(JuliaInterpreter.framecode_lines, src)
 
-                source_name = string(uuid4())
+                source_name = string(UUIDs.uuid4())
 
                 DebugEngines.set_source(debug_session.debug_engine, source_name, join(code, '\n'))
                 source_id = DebugEngines.get_source_id(debug_session.debug_engine, source_name)
@@ -468,7 +467,6 @@ end
 
 function scopes_request(debug_session::DebugSession, params::ScopesArguments)
     @debug "getscope_request"
-    empty!(debug_session.varrefs)
 
     curr_fr = JuliaInterpreter.leaf(debug_session.debug_engine.frame)
 
@@ -873,6 +871,7 @@ function set_variable_request(debug_session::DebugSession, params::SetVariableAr
 end
 
 function restart_frame_request(debug_session::DebugSession, params::RestartFrameArguments)
+    debug_engine = debug_session.debug_engine
     frame_id = params.frameId
 
     curr_fr = JuliaInterpreter.leaf(debug_session.debug_engine.frame)
@@ -896,7 +895,7 @@ function restart_frame_request(debug_session::DebugSession, params::RestartFrame
         debug_session.debug_engine.frame = curr_fr
     end
 
-    put!(debug_session.next_cmd, (cmd = :continue,))
+    put!(debug_engine.next_cmd, (cmd = :continue,))
 
     return RestartFrameResponseResponseArguments()
 end
@@ -916,6 +915,10 @@ end
 
 function evaluate_request(debug_session::DebugSession, params::EvaluateArguments)
     @debug "evaluate_request"
+
+    if ismissing(params.frameId)
+        return EvaluateResponseArguments("Error: received evaluate request without a frameId, this shouldn't happen for the Julia debugger.", missing, missing, 0, missing, missing, missing)
+    end
 
     curr_fr = debug_session.debug_engine.frame
     curr_i = 1
