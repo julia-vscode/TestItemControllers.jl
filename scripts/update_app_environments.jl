@@ -17,6 +17,11 @@ julia_versions = [
 for i in julia_versions
     version_path = normpath(joinpath(@__DIR__, "../testprocess/environments/v$i"))
     mkpath(version_path)
+
+    parsed_version = VersionNumber(i)
+    if parsed_version < v"1.10"
+        run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../../packages-old/v1.9/Compiler"))'`, dir=version_path))
+    end
     run(Cmd(`julia +$i --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path="../../TestItemServer"))'`, dir=version_path))
 end
 

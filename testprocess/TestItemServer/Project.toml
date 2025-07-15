@@ -4,6 +4,7 @@ authors = ["David Anthoff <anthoff@berkeley.edu>"]
 version = "1.0.0"
 
 [deps]
+Compiler = "807dbc54-b67e-4c79-8afb-eafe4df6f2e1"
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
