@@ -1,6 +1,7 @@
 include("../../../packages/TestEnv/src/TestEnv.jl")
 include("../../../packages/URIParser/src/URIParser.jl")
 include("../../../packages/JSON/src/JSON.jl")
+
 if VERSION >= v"1.6.0"
     include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
 else
@@ -35,6 +36,10 @@ module JuliaInterpreter
     end
 end
 
+@static if VERSION >= v"1.10.0"
+    include("../../../packages/Compiler/src/Compiler.jl")
+end
+
 module LoweredCodeUtils
     @static if VERSION >= v"1.10.0"
         using ..JuliaInterpreter
@@ -42,6 +47,7 @@ module LoweredCodeUtils
         using ..JuliaInterpreter: codelocation, is_global_ref, is_global_ref_egal, is_quotenode_egal, is_return,
             lookup, lookup_return, linetable, moduleof, next_until!, nstatements, pc_expr,
             step_expr!, whichtt
+        using Compiler: Compiler as CC
 
         include("../../../packages/LoweredCodeUtils/src/packagedef.jl")
     elseif VERSION >= v"1.6.0"
