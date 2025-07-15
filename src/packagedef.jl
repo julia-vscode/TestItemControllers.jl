@@ -1,7 +1,7 @@
 
 # include("../../VSCodeServer/src/repl.jl")
 
-import Sockets, Base64
+import Sockets, Base64, UUIDs
 
 module DAPRPC
     using ..JSON
@@ -73,7 +73,8 @@ function Base.run(debug_session::DebugSession, error_handler=nothing)
         msg_dispatcher[stack_trace_request_type] = params -> stack_trace_request(debug_session, params)
         msg_dispatcher[scopes_request_type] = params -> scopes_request(debug_session, params)
         msg_dispatcher[source_request_type] = params -> source_request(debug_session, params)
-        msg_dispatcher[variables_request_type] = params -> variables_request(debug_session, params)
+        # `invokelatest` is needed due to #3083
+        msg_dispatcher[variables_request_type] = params -> invokelatest(variables_request, debug_session, params)
         msg_dispatcher[continue_request_type] = params -> continue_request(debug_session, params)
         msg_dispatcher[next_request_type] = params -> next_request(debug_session, params)
         msg_dispatcher[step_in_request_type] = params -> setp_in_request(debug_session, params)
@@ -135,6 +136,7 @@ function Base.run(debug_session::DebugSession, error_handler=nothing)
                     next_cmd.filename,
                     debug_session.stop_on_entry,
                     (reason, message::Union{String,Nothing}=nothing) -> begin
+                        empty!(debug_session.varrefs)
                         if reason==DebugEngines.StopReasonBreakpoint
                             DAPRPC.send(endpoint, stopped_notification_type, StoppedEventArguments("breakpoint", missing, 1, missing, missing, missing))
                         elseif reason==DebugEngines.StopReasonException
@@ -165,7 +167,7 @@ function Base.run(debug_session::DebugSession, error_handler=nothing)
 
                 put!(debug_session.finished_execution, true)
             else
-                error("Unknown command")
+                error("Unknown command $(next_cmd.cmd)")
             end
         end
 
@@ -191,6 +193,7 @@ function terminate(debug_session::DebugSession)
     if debug_session.debug_engine!==nothing
         DebugEngines.execution_terminate(debug_session.debug_engine)
     end
+    put!(debug_session.next_cmd, (;cmd=:terminate))
 end
 
 function Base.close(debug_session::DebugSession)
