@@ -71,6 +71,8 @@ function create_testprocess(
 
         cs = CancellationTokens.CancellationTokenSource()
 
+        julia_proc_cs = nothing
+
         queued_tests_n = 0
         queued_test_cancels_n = 0
         finished_testitems = Set{String}()
@@ -103,9 +105,11 @@ function create_testprocess(
                 test_setups =msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
             elseif msg.event == :cancel_test_run
+                CancellationTokens.cancel(julia_proc_cs)
                 kill(jl_process)
                 jl_process = nothing
                 endpoint = nothing
+                julia_proc_cs = nothing
                 # put!(msg_channel, (;event = :start))
 
                 # tp.killed = true
@@ -152,17 +156,23 @@ function create_testprocess(
                 state = :testrun_killed_after_revise_fail
 
                 @info "Revise could not handle changes or test env was changed, restarting process"
+                CancellationTokens.cancel(julia_proc_cs)
                 kill(jl_process)
                 jl_process = nothing
                 endpoint = nothing
+                julia_proc_cs = nothing
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :start
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition")
                 state = :testrun_starting
 
+                julia_proc_cs === nothing || error("Invalid state for julia_proc_cs")
+                julia_proc_cs = CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
+
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
-                    start(testprocess_id, controller_msg_channel, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(cs))
+
+                    start(testprocess_id, controller_msg_channel, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(julia_proc_cs))
                 catch err
                     Base.display_error(err, catch_backtrace())
                 end
@@ -574,7 +584,9 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                     end
 
                     output_for_ti = output_for_test_items[end].second
-                    print(output_for_ti, buffer[i])
+                    if !CancellationTokens.is_cancellation_requested(token)
+                        print(output_for_ti, buffer[i])
+                    end
 
                     i = nextind(buffer, i)
                 end
