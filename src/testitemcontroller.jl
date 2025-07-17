@@ -50,14 +50,7 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
 end
 
 function shutdown(controller::TestItemController)
-    for i in Iterators.flatten(values(controller.testprocesses))
-        put!(
-            i.msg_channel,
-            (;
-                event = :shutdown
-            )
-        )
-    end
+    put!(controller.msg_channel, (;event=:shutdown))
 end
 
 function terminate_test_process(controller::TestItemController, id::String)
@@ -82,7 +75,17 @@ function Base.run(
     while true
         msg = take!(controller.msg_channel)
 
-        if msg.event == :test_process_status_changed
+        if msg.event == :shutdown
+            for i in Iterators.flatten(values(controller.testprocesses))
+                put!(
+                    i.msg_channel,
+                    (;
+                        event = :shutdown
+                    )
+                )
+            end
+            break
+        elseif msg.event == :test_process_status_changed
             # Inform the user via callback
             testprocess_statuschanged(msg.id, msg.status)
         elseif msg.event == :testprocess_output

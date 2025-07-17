@@ -15,6 +15,8 @@ module JSONRPC
 end
 
 export JSONRPCTestItemController
+export TestItemController
+export shutdown
 
 include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
