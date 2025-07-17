@@ -6,8 +6,8 @@ mutable struct TestProcess
     # status::Symbol
 end
 
-mutable struct TestItemController{ERR_HANDLER<:Function}
-    err_handler::Union{Nothing,ERR_HANDLER}
+mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
+    err_handler::ERR_HANDLER
 
     msg_channel::Channel
 
@@ -31,7 +31,7 @@ mutable struct TestItemController{ERR_HANDLER<:Function}
     crash_reporting_pipename::Union{Nothing,String}
 
     function TestItemController(
-        err_handler::ERR_HANDLER;
+        err_handler::ERR_HANDLER=nothing;
         error_handler_file=nothing,
         crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
 
