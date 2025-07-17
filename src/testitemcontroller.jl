@@ -60,17 +60,17 @@ function terminate_test_process(controller::TestItemController, id::String)
                 put!(p.msg_channel, (;event=:terminate))
             end
         end
-    end
-
+    end    
+  
     return nothing
 end
 
 function Base.run(
         controller::TestItemController,
-        testprocess_created_callback,
-        testprocess_terminated,
-        testprocess_statuschanged,
-        testprocess_output
+        testprocess_created_callback=nothing,
+        testprocess_terminated=nothing,
+        testprocess_statuschanged=nothing,
+        testprocess_output=nothing
     )
     while true
         msg = take!(controller.msg_channel)
@@ -87,9 +87,13 @@ function Base.run(
             break
         elseif msg.event == :test_process_status_changed
             # Inform the user via callback
-            testprocess_statuschanged(msg.id, msg.status)
+            if testprocess_statuschanged!==nothing
+                testprocess_statuschanged(msg.id, msg.status)
+            end
         elseif msg.event == :testprocess_output
-            testprocess_output(msg.id, msg.output)
+            if testprocess_output!==nothing
+                testprocess_output(msg.id, msg.output)
+            end
         elseif msg.event == :test_process_terminated
             for procs in values(controller.testprocesses)
                 ind = findfirst(i->i.id==msg.id, procs)
@@ -100,11 +104,15 @@ function Base.run(
             end
 
             # Inform the user via callback
-            testprocess_terminated(msg.id)
+            if testprocess_terminated!==nothing
+                testprocess_terminated(msg.id)
+            end
         elseif msg.event == :return_to_pool
             put!(msg.testprocess.msg_channel, (;event=:end_testrun))
             msg.testprocess.idle = true
-            testprocess_statuschanged(msg.testprocess.id, "Idle")
+            if testprocess_statuschanged!==nothing
+                testprocess_statuschanged(msg.testprocess.id, "Idle")
+            end
         elseif msg.event == :get_procs_for_testrun
             our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
 
@@ -227,7 +235,9 @@ function Base.run(
 
                     push!(testprocesses, p)
 
-                    testprocess_created_callback(testprocess_id, k.package_name, k.package_uri, k.project_uri, k.mode == "Coverage", k.env)
+                    if testprocess_created_callback!==nothing
+                        testprocess_created_callback(testprocess_id, k.package_name, k.package_uri, k.project_uri, k.mode == "Coverage", k.env)
+                    end
                 end
             end
 
