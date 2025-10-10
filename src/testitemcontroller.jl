@@ -379,7 +379,7 @@ function execute_testrun(
     # Finally, we send error notifications for all test items that didn't have a package
     for i in test_items_without_package
         testitem_failed_callback(
-            params.testRunId,
+            testrun_id,
             i.id,
             TestItemControllerProtocol.TestMessage[
                 TestItemControllerProtocol.TestMessage(
