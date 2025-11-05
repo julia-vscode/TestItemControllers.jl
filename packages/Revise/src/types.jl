@@ -15,15 +15,142 @@ mutable struct WatchList
     trackedfiles::Dict{String,PkgId}
 end
 
-const ExprsSigs = OrderedDict{RelocatableExpr,Union{Nothing,Vector{Any}}}
+const DocExprs = Dict{Module,Vector{Expr}}
+
+"""
+    ExtendedData
+
+Linked list structure for storing extension data from multiple tools.
+Each node contains:
+- `owner::Symbol`: The extension that owns this data (e.g., `:jet`, `:coverage`)
+- `data`: The extension-specific data (untyped for flexibility)
+- `next::Union{ExtendedData,Nothing}`: Link to the next extension's data
+
+The linked list allows multiple extensions to attach data to the same signature
+without interfering with each other.
+"""
+struct ExtendedData
+    owner::Symbol
+    data::Any
+    next::ExtendedData
+    ExtendedData(owner::Symbol, @nospecialize(data), next::ExtendedData) = new(owner, data, next)
+    ExtendedData(owner::Symbol, @nospecialize(data)) = new(owner, data)
+    ExtendedData() = new(:Revise, nothing)
+end
+
+# Sentinel value representing the absence of extension data.
+const no_extended_data = ExtendedData()
+
+"""
+    SigInfo
+
+Data structure used as a leaf node of the `pkgdatas` data structure,
+which can hold additional extension data.
+
+Fields:
+- `mt::Union{Nothing,MethodTable}`: Method table (or `nothing`)
+- `sig::Type`: Signature type
+- `ext::ExtendedData`: Extension data (for external tools like JET),
+  stored as a linked list of [`ExtendedData`](@ref)
+
+This is a Revise-internal data structure; when interacting with CodeTracking,
+use `MethodInfoKey(::SigInfo)` to convert to `MethodInfoKey`.
+"""
+struct SigInfo
+    mt::Union{Nothing,MethodTable}
+    sig::Type
+    ext::ExtendedData
+    SigInfo(mt::Union{Nothing,MethodTable}, @nospecialize(sig::Type), ext::ExtendedData) = new(mt, sig, ext)
+end
+
+SigInfo(mt::Union{Nothing,MethodTable}, sig::Type) = SigInfo(mt, sig, no_extended_data)
+SigInfo((mt, sig)::MethodInfoKey) = SigInfo(mt, sig, no_extended_data)
+
+function Base.iterate(e::SigInfo, st::Int=0)
+    if st == 0
+        return e.mt, 1
+    elseif st == 1
+        return e.sig, 2
+    elseif st == 2
+        return e.ext, 3
+    else
+        return nothing
+    end
+end
+
+CodeTracking.MethodInfoKey(si::SigInfo) = MethodInfoKey(si.mt, si.sig)
+
+"""
+    get_extended_data(ext::ExtendedData, owner::Symbol) -> ext::Union{ExtendedData,Nothing}
+
+Retrieve extension data for a specific owner from the linked list.
+Returns `nothing` if no data is found for the given owner.
+"""
+function get_extended_data(ext::ExtendedData, owner::Symbol)
+    while true
+        ext.owner === owner && return ext
+        isdefined(ext, :next) || break
+        ext = ext.next
+    end
+    return nothing
+end
+
+"""
+    get_extended_data(siginfo::SigInfo, owner::Symbol) -> ext::Union{ExtendedData,Nothing}
+
+Retrieve extension data for a specific owner from the `SigInfo`'s extension data.
+Returns `nothing` if no data is found for the given owner.
+"""
+get_extended_data(siginfo::SigInfo, owner::Symbol) = get_extended_data(siginfo.ext, owner)
+
+"""
+    replace_extended_data(ext::ExtendedData, owner::Symbol, @nospecialize(data)) -> new_ext::ExtendedData
+
+Replace extension data for a specific owner, or add it if not present.
+Returns a new `ExtendedData` linked list with the updated data.
+"""
+function replace_extended_data(ext::ExtendedData, owner::Symbol, @nospecialize(data))
+    if isdefined(ext, :next)
+        if ext.owner === owner
+            # Base case: this is the node to replace
+            return ExtendedData(owner, data, ext.next)
+        else
+            # Recursive case: rebuild this node with updated next
+            return ExtendedData(ext.owner, ext.data, replace_extended_data(ext.next, owner, data))
+        end
+    else
+        if ext.owner === owner
+            # If this is the last node and we found the owner, just return new node
+            return ExtendedData(owner, data)
+        else
+            # If this is the last node and we haven't found the owner, add new node at end
+            return ExtendedData(ext.owner, ext.data, ExtendedData(owner, data))
+        end
+    end
+end
+
+"""
+    replace_extended_data(siginfo::SigInfo, owner::Symbol, @nospecialize(data)) -> new_siginfo::SigInfo
+
+Replace extension data for a specific owner in a `SigInfo`, or add it if not present.
+Returns a new `SigInfo` with the updated extension data.
+"""
+function replace_extended_data(siginfo::SigInfo, owner::Symbol, @nospecialize(data))
+    new_ext = replace_extended_data(siginfo.ext, owner, data)
+    return SigInfo(siginfo.mt, siginfo.sig, new_ext)
+end
+
+const ExprsSigs = OrderedDict{RelocatableExpr,Union{Nothing,Vector{SigInfo}}}
+const DepDictVals = Tuple{Module,RelocatableExpr}
+const DepDict = Dict{Symbol,Set{DepDictVals}}
 
 function Base.show(io::IO, exsigs::ExprsSigs)
     compact = get(io, :compact, false)
     if compact
         n = 0
-        for (rex, sigs) in exsigs
-            sigs === nothing && continue
-            n += length(sigs)
+        for (rex, mt_sigs) in exsigs
+            mt_sigs === nothing && continue
+            n += length(mt_sigs)
         end
         print(io, "ExprsSigs(<$(length(exsigs)) expressions>, <$n signatures>)")
     else
@@ -39,11 +166,11 @@ end
     ModuleExprsSigs
 
 For a particular source file, the corresponding `ModuleExprsSigs` is a mapping
-`mod=>exprs=>sigs` of the expressions `exprs` found in `mod` and the signatures `sigs`
+`mod=>exprs=>mt_sigs` of the expressions `exprs` found in `mod` and the method table/signature pairs `mt_sigs`
 that arise from them. Specifically, if `mes` is a `ModuleExprsSigs`, then `mes[mod][ex]`
-is a list of signatures that result from evaluating `ex` in `mod`. It is possible that
+is a list of method table/signature pairs that result from evaluating `ex` in `mod`. It is possible that
 this returns `nothing`, which can mean either that `ex` does not define any methods
-or that the signatures have not yet been cached.
+or that the method table/signature pairs have not yet been cached.
 
 The first `mod` key is guaranteed to be the module into which this file was `include`d.
 
@@ -181,10 +308,10 @@ function Base.show(io::IO, pkgdata::PkgData)
         for fi in pkgdata.fileinfos
             thisnexs, thisnsigs = 0, 0
             for (mod, exsigs) in fi.modexsigs
-                for (rex, sigs) in exsigs
+                for (rex, mt_sigs) in exsigs
                     thisnexs += 1
-                    sigs === nothing && continue
-                    thisnsigs += length(sigs)
+                    mt_sigs === nothing && continue
+                    thisnsigs += length(mt_sigs)
                 end
             end
             nexs += thisnexs

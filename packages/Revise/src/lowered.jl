@@ -9,11 +9,11 @@ end
 # This defines the API needed to store signatures using methods_by_execution!
 # This default version is simple and only used for testing purposes.
 # The "real" one is CodeTrackingMethodInfo in Revise.jl.
-const MethodInfo = IdDict{Type,LineNumberNode}
-add_signature!(methodinfo, @nospecialize(sig), ln) = push!(methodinfo, sig=>ln)
-push_expr!(methodinfo, mod::Module, ex::Expr) = methodinfo
-pop_expr!(methodinfo) = methodinfo
-add_includes!(methodinfo, mod::Module, filename) = methodinfo
+const MethodInfo = IdDict{MethodInfoKey,LineNumberNode}
+add_signature!(methodinfo::MethodInfo, sig::MethodInfoKey, ln::LineNumberNode) = push!(methodinfo, sig=>ln)
+push_expr!(methodinfo::MethodInfo, ::Expr) = methodinfo
+pop_expr!(methodinfo::MethodInfo) = methodinfo
+add_includes!(methodinfo::MethodInfo, mod::Module, filename) = methodinfo
 
 function is_some_include(@nospecialize(f))
     @assert !isa(f, Core.SSAValue) && !isa(f, JuliaInterpreter.SSAValue)
@@ -108,7 +108,7 @@ function defines_function(@nospecialize(ci))
 end
 
 """
-    isrequired, evalassign = minimal_evaluation!([predicate,] methodinfo, src::Core.CodeInfo, mode::Symbol)
+    isrequired, evalassign = minimal_evaluation!([predicate,] src::Core.CodeInfo, mode::Symbol)
 
 Mark required statements in `src`: `isrequired[i]` is `true` if `src.code[i]` should be evaluated.
 Statements are analyzed by `isreq, haseval = predicate(stmt)`, and `predicate` defaults
@@ -117,7 +117,7 @@ to `Revise.is_method_or_eval`.
 Since the contents of such expression are difficult to analyze, it is generally
 safest to execute all such evals.
 """
-function minimal_evaluation!(@nospecialize(predicate), methodinfo, mod::Module, src::Core.CodeInfo, mode::Symbol)
+function minimal_evaluation!(@nospecialize(predicate), mod::Module, src::Core.CodeInfo, mode::Symbol)
     edges = CodeEdges(mod, src)
     # LoweredCodeUtils.print_with_code(stdout, src, edges)
     isrequired = fill(false, length(src.code))
@@ -177,11 +177,11 @@ function minimal_evaluation!(@nospecialize(predicate), methodinfo, mod::Module, 
     # LoweredCodeUtils.print_with_code(stdout, src, isrequired)
     return isrequired, evalassign
 end
-@noinline minimal_evaluation!(@nospecialize(predicate), methodinfo, frame::Frame, mode::Symbol) =
-    minimal_evaluation!(predicate, methodinfo, moduleof(frame), frame.framecode.src, mode)
+@noinline minimal_evaluation!(@nospecialize(predicate), frame::Frame, mode::Symbol) =
+    minimal_evaluation!(predicate, moduleof(frame), frame.framecode.src, mode)
 
-function minimal_evaluation!(methodinfo, frame::Frame, mode::Symbol)
-    minimal_evaluation!(methodinfo, frame, mode) do @nospecialize(stmt), code::Vector{Any}
+function minimal_evaluation!(frame::Frame, mode::Symbol)
+    minimal_evaluation!(frame, mode) do @nospecialize(stmt), code::Vector{Any}
         ismeth, haseval, isinclude, isnamespace, istoplevel = categorize_stmt(stmt, code)
         isreq = ismeth | isinclude | istoplevel
         return mode === :sigs ? (isreq, haseval) : (isreq | isnamespace, haseval)
@@ -190,7 +190,7 @@ end
 
 function methods_by_execution(mod::Module, ex::Expr; kwargs...)
     methodinfo = MethodInfo()
-    value, thk = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, mod, ex; kwargs...)
+    _, thk = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, mod, ex; kwargs...)
     return methodinfo, thk
 end
 
@@ -252,7 +252,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, mod::Module, ex:
     frame = Frame(mod, lwr.args[1]::CodeInfo)
     mode === :eval || LoweredCodeUtils.rename_framemethods!(interp, frame)
     # Determine whether we need interpreted mode
-    isrequired, evalassign = minimal_evaluation!(methodinfo, frame, mode)
+    isrequired, evalassign = minimal_evaluation!(frame, mode)
     # LoweredCodeUtils.print_with_code(stdout, frame.framecode.src, isrequired)
     if !any(isrequired) && (mode===:eval || !evalassign)
         # We can evaluate the entire expression in compiled mode
@@ -283,7 +283,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, mod::Module, ex:
         ret = try
             _methods_by_execution!(interp, methodinfo, frame, isrequired; mode, kwargs...)
         catch err
-            (always_rethrow || isa(err, InterruptException)) && (disablebp && foreach(enable, active_bp_refs); rethrow(err))
+            (always_rethrow || isa(err, InterruptException)) && (@isdefined(active_bp_refs) && foreach(enable, active_bp_refs); rethrow(err))
             loc = location_string(whereis(frame))
             sfs = []  # crafted for interaction with Base.show_backtrace
             frame = JuliaInterpreter.leaf(frame)
@@ -293,7 +293,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, mod::Module, ex:
             end
             throw(ReviseEvalException(loc, err, sfs))
         end
-        if disablebp
+        if @isdefined active_bp_refs
             foreach(enable, active_bp_refs)
         end
     end
@@ -309,7 +309,7 @@ function _methods_by_execution!(interp::Interpreter, methodinfo, frame::Frame, i
     mod = moduleof(frame)
     # Hoist this lookup for performance. Don't throw even when `mod` is a baremodule:
     modinclude = isdefined(mod, :include) ? getfield(mod, :include) : nothing
-    signatures = []  # temporary for method signature storage
+    signatures = MethodInfoKey[]  # temporary for method signature storage
     pc = frame.pc
     while true
         JuliaInterpreter.is_leaf(frame) || (@warn("not a leaf"); break)
@@ -327,7 +327,7 @@ function _methods_by_execution!(interp::Interpreter, methodinfo, frame::Frame, i
                     ex isa Expr || continue
                     value, _ = methods_by_execution!(interp, methodinfo, mod, ex; mode, disablebp=false, skip_include)
                 end
-                isassign(frame, pc) && assign_this!(frame, value)
+                isassign(frame, pc) && @isdefined(value) && assign_this!(frame, value)
                 pc = next_or_nothing!(frame)
             elseif head === :thunk && defines_function(only(stmt.args))
                 mode !== :sigs && Core.eval(mod, stmt)
@@ -457,13 +457,13 @@ function _methods_by_execution!(interp::Interpreter, methodinfo, frame::Frame, i
                         uT = Base.unwrap_unionall(T)::DataType
                         ft = uT.types
                         sig1 = Tuple{Base.rewrap_unionall(Type{uT}, T), Any[Any for i in 1:length(ft)]...}
-                        push!(signatures, sig1)
+                        push!(signatures, MethodInfoKey(nothing, sig1))
                         sig2 = Base.rewrap_unionall(Tuple{Type{T}, ft...}, T)
                         while T isa UnionAll
                             sig2 isa UnionAll || (sig2 = sig1; break) # sig2 doesn't define all parameters, so drop it
                             T = T.body
                         end
-                        sig1 == sig2 || push!(signatures, sig2)
+                        sig1 == sig2 || push!(signatures, MethodInfoKey(nothing, sig2))
                         for sig in signatures
                             add_signature!(methodinfo, sig, lnn)
                         end
@@ -483,7 +483,7 @@ function _methods_by_execution!(interp::Interpreter, methodinfo, frame::Frame, i
                             newex = newex.args[4]
                         end
                         newex = unwrap(newex)
-                        push_expr!(methodinfo, newmod, newex)
+                        push_expr!(methodinfo, newex)
                         value, _ = methods_by_execution!(interp, methodinfo, newmod, newex; mode, skip_include, disablebp=false)
                         pop_expr!(methodinfo)
                     end

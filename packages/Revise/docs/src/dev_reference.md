@@ -7,6 +7,7 @@
 These are set during execution of Revise's `__init__` function.
 
 ```@docs
+Revise.active
 Revise.watching_files
 Revise.polling_files
 Revise.tracking_Main_includes
@@ -16,6 +17,7 @@ Revise.tracking_Main_includes
 
 ```@docs
 Revise.juliadir
+Revise.expected_juliadir
 Revise.basesrccache
 Revise.basebuilddir
 ```
@@ -151,4 +153,13 @@ Revise.git_repo
 
 ```@docs
 Revise.init_worker
+```
+
+## Extension system
+
+```@docs
+Revise.SigInfo
+Revise.ExtendedData
+Revise.get_extended_data
+Revise.replace_extended_data
 ```
