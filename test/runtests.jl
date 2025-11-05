@@ -4,7 +4,7 @@ using CodeTracking
 using Test, InteractiveUtils, REPL, LinearAlgebra, SparseArrays
 # Note: ColorTypes needs to be installed, but note the intentional absence of `using ColorTypes`
 
-using CodeTracking: line_is_decl
+using CodeTracking: line_is_decl, MethodInfoKey
 
 if !isempty(ARGS) && "revise" ∈ ARGS
     # For running tests with and without Revise
@@ -72,7 +72,7 @@ isdefined(Main, :Revise) ? Main.Revise.includet("script.jl") : include("script.j
     info = CodeTracking.PkgFiles(Base.PkgId(CodeTracking), nothing)
     @test isempty(CodeTracking.basedir(info))
 
-    info = CodeTracking.PkgFiles(Base.PkgId(CodeTracking), [])
+    info = CodeTracking.PkgFiles(Base.PkgId(CodeTracking), String[])
     @test length(CodeTracking.srcfiles(info)) == 0
 
     info = CodeTracking.PkgFiles(Base.PkgId(CodeTracking))
@@ -87,7 +87,7 @@ isdefined(Main, :Revise) ? Main.Revise.includet("script.jl") : include("script.j
     ioctx = IOContext(io, :compact=>true)
     show(ioctx, info)
     str = read(io, String)
-    @test match(r"PkgFiles\(CodeTracking, .*CodeTracking(\.jl)?, Any\[\]\)", str) !== nothing
+    @test match(r"PkgFiles\(CodeTracking, .*CodeTracking(\.jl)?, String\[\]\)", str) !== nothing
 
     @test pkgfiles("ColorTypes") === nothing
     @test_throws ErrorException pkgfiles("NotAPkg")
@@ -101,7 +101,7 @@ isdefined(Main, :Revise) ? Main.Revise.includet("script.jl") : include("script.j
 
     # Test a method marked as missing
     m = @which sum(1:5)
-    CodeTracking.method_info[m.sig] = missing
+    CodeTracking.method_info[MethodInfoKey(nothing, m.sig)] = missing
     @test whereis(m) == (CodeTracking.maybe_fix_path(String(m.file)), m.line)
     @test definition(m) === nothing
 
@@ -292,13 +292,18 @@ isdefined(Main, :Revise) ? Main.Revise.includet("script.jl") : include("script.j
     src, line = definition(String, m)
     @test occursin("::Type{P}", src)
     @test line == 148
+
+    # Graceful handling of `kwcall` definition lookup failure
+    m = @which Core.kwcall(NamedTuple(), Union{})
+    @test_throws "could not identify method name in `Core.kwcall`" definition(String, m)
+    @test_throws "signature: Tuple{typeof(Core.kwcall), Any, Type{Union{}}, Vararg{Any}}" definition(String, m)
 end
 
 @testset "With Revise" begin
     if isdefined(Main, :Revise)
         m = @which gcd(10, 20)
-        sigs = signatures_at(Base.find_source_file(String(m.file)), m.line)
-        @test !isempty(sigs)
+        mt_sigs = signatures_at(Base.find_source_file(String(m.file)), m.line)
+        @test !isempty(mt_sigs)
         ex = @code_expr(gcd(10, 20))
         @test ex isa Expr
         body = ex.args[2]
@@ -308,10 +313,10 @@ end
 
         if Base.VERSION < v"1.11.0-0"
             m = first(methods(edit))
-            sigs = signatures_at(String(m.file), m.line)
-            @test !isempty(sigs)
-            sigs = signatures_at(Base.find_source_file(String(m.file)), m.line)
-            @test !isempty(sigs)
+            mt_sigs = signatures_at(String(m.file), m.line)
+            @test !isempty(mt_sigs)
+            mt_sigs = signatures_at(Base.find_source_file(String(m.file)), m.line)
+            @test !isempty(mt_sigs)
         end
 
         # issue #23
@@ -321,9 +326,10 @@ end
 
         if isdefined(Revise, :add_revise_deps)
             Revise.add_revise_deps()
-            sigs = signatures_at(CodeTracking, "src/utils.jl", 5)
-            @test length(sigs) == 1       # only isn't available on julia 1.0
-            @test first(sigs) == Tuple{typeof(CodeTracking.checkname), Expr, Any}
+            mt_sigs = signatures_at(CodeTracking, "src/utils.jl", 5)
+            @test length(mt_sigs) == 1       # only isn't available on julia 1.0
+            (mt, sig) = first(mt_sigs)
+            @test sig == Tuple{typeof(CodeTracking.checkname), Expr, Any}
             @test pkgfiles(CodeTracking).id == Base.PkgId(CodeTracking)
         end
 
@@ -453,4 +459,21 @@ end
 @testset "strip_gensym with unicode" begin
     @test CodeTracking.strip_gensym("#𝓔′#90") == :𝓔′
     @test CodeTracking.strip_gensym("𝓔′##kw") == :𝓔′
+end
+
+@testset "External method tables" begin
+    mod = @eval module $(gensym(:ExternalMT))
+        Base.Experimental.@MethodTable method_table
+    end
+    ex = :(Base.Experimental.@overlay method_table +(x::String, y::String) = x * y)
+    if VERSION ≥ v"1.13-"
+        method = Core.eval(mod, ex)
+    else
+        Core.eval(mod, ex)
+        method = only(Base.MethodList(mod.method_table).ms)
+    end
+    lnn = LineNumberNode(Int(method.line), method.file)
+    @test CodeTracking.definition(Expr, method) === nothing
+    CodeTracking.method_info[MethodInfoKey(method)] = [(lnn, ex)]
+    @test CodeTracking.definition(Expr, method) == ex
 end
