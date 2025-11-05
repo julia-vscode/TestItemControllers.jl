@@ -13,7 +13,7 @@ const kwinvoke = Core.kwfunc(Core.invoke)
 
 function maybe_recurse_expanded_builtin(interp::Interpreter, frame::Frame, new_expr::Expr)
     f = new_expr.args[1]
-    if isa(f, Core.Builtin) || isa(f, Core.IntrinsicFunction)
+    if supertype(typeof(f)) === Core.Builtin || isa(f, Core.IntrinsicFunction)
         return maybe_evaluate_builtin(interp, frame, new_expr, true)
     else
         return new_expr
@@ -48,7 +48,7 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         end
         return Some{Any}(f(args...))
     end
-    if !(isa(f, Core.Builtin) || isa(f, Core.IntrinsicFunction))
+    if !(supertype(typeof(f)) === Core.Builtin || isa(f, Core.IntrinsicFunction))
         return call_expr
     end
     # By having each call appearing statically in the "switch" block below,
@@ -134,6 +134,10 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
         else
             return Some{Any}(Core.current_scope(getargs(interp, args, frame)...))
         end
+    elseif @static isdefinedglobal(Core, :declare_const) && f === Core.declare_const
+        return Some{Any}(Core.declare_const(getargs(interp, args, frame)...))
+    elseif @static isdefinedglobal(Core, :declare_global) && f === Core.declare_global
+        return Some{Any}(Core.declare_global(getargs(interp, args, frame)...))
     elseif f === Core.donotdelete
         return Some{Any}(Core.donotdelete(getargs(interp, args, frame)...))
     elseif f === Core.finalizer
@@ -403,7 +407,9 @@ function maybe_evaluate_builtin(interp::Interpreter, frame::Frame, call_expr::Ex
             return Some{Any}(throw(getargs(interp, args, frame)...))
         end
     elseif f === tuple
-        return Some{Any}(ntupleany(i::Int->lookup(interp, frame, args[i+1]), length(args)-1))
+        let args=args
+            return Some{Any}(ntupleany(i::Int->lookup(interp, frame, args[i+1]), length(args)-1))
+        end
     elseif f === typeassert
         if nargs == 2
             return Some{Any}(typeassert(lookup(interp, frame, args[2]), lookup(interp, frame, args[3])))
