@@ -16,23 +16,25 @@
 #     possible that this needs to be supplemented with parsing.
 function queue_includes!(pkgdata::PkgData, id::PkgId)
     modstring = id.name
-    delids = Int[]
-    for i = 1:length(included_files)
-        mod, fname = included_files[i]
-        if mod == Base.__toplevel__
-            mod = Main
-        end
-        modname = String(Symbol(mod))
-        if startswith(modname, modstring) || endswith(fname, modstring*".jl")
-            modexsigs = parse_source(fname, mod)
-            if modexsigs !== nothing
-                fname = relpath(fname, pkgdata)
-                push!(pkgdata, fname=>FileInfo(modexsigs))
+    @lock included_files_lock begin
+        delids = Int[]
+        for i = 1:length(included_files)
+            mod, fname = included_files[i]
+            if mod == Base.__toplevel__
+                mod = Main
             end
-            push!(delids, i)
+            modname = String(Symbol(mod))
+            if startswith(modname, modstring) || endswith(fname, modstring*".jl")
+                modexsigs = parse_source(fname, mod)
+                if modexsigs !== nothing
+                    fname = relpath(fname, pkgdata)
+                    push!(pkgdata, fname=>FileInfo(modexsigs))
+                end
+                push!(delids, i)
+            end
         end
+        deleteat!(included_files, delids)
     end
-    deleteat!(included_files, delids)
     CodeTracking._pkgfiles[id] = pkgdata.info
     return pkgdata
 end
@@ -47,7 +49,7 @@ function queue_includes(mod::Module)
     if has_writable_paths(pkgdata)
         init_watching(pkgdata)
     end
-    pkgdatas[id] = pkgdata
+    @lock pkgdatas_lock pkgdatas[id] = pkgdata
     return pkgdata
 end
 
@@ -57,13 +59,15 @@ end
 function remove_from_included_files(modsym::Symbol)
     i = 1
     modstring = string(modsym)
-    while i <= length(included_files)
-        mod, fname = included_files[i]
-        modname = String(Symbol(mod))
-        if startswith(modname, modstring) || endswith(fname, modstring*".jl")
-            deleteat!(included_files, i)
-        else
-            i += 1
+    @lock included_files_lock begin
+        while i <= length(included_files)
+            mod, fname = included_files[i]
+            modname = String(Symbol(mod))
+            if startswith(modname, modstring) || endswith(fname, modstring*".jl")
+                deleteat!(included_files, i)
+            else
+                i += 1
+            end
         end
     end
 end
@@ -330,7 +334,7 @@ function watch_package(id::PkgId)
         if has_writable_paths(pkgdata)
             init_watching(pkgdata, srcfiles(pkgdata))
         end
-        pkgdatas[id] = pkgdata
+        @lock pkgdatas_lock pkgdatas[id] = pkgdata
     finally
         unlock(wplock)
     end
@@ -359,7 +363,7 @@ function has_writable_paths(pkgdata::PkgData)
 end
 
 function watch_includes(mod::Module, fn::AbstractString)
-    push!(included_files, (mod, normpath(abspath(fn))))
+    @lock included_files_lock push!(included_files, (mod, normpath(abspath(fn))))
 end
 
 ## Working with Pkg and code-loading
@@ -416,55 +420,23 @@ function watch_manifest(mfile::String)
                 @debug "Pkg" _group="manifest_update" manifest_file=mfile
                 isfile(mfile) || return nothing
                 pkgdirs = manifest_paths(mfile)
+                pathreplacements = Pair{String,String}[]
                 for (id, pkgdir) in pkgdirs
                     if haskey(pkgdatas, id)
                         pkgdata = pkgdatas[id]
                         if pkgdir != basedir(pkgdata)
                             ## The package directory has changed
                             @debug "Pkg" _group="pathswitch" oldpath=basedir(pkgdata) newpath=pkgdir
-                            # Stop all associated watching tasks
-                            for dir in unique_dirs(srcfiles(pkgdata))
-                                @debug "Pkg" _group="unwatch" dir=dir
-                                delete!(watched_files, joinpath(basedir(pkgdata), dir))
-                                # Note: if the file is revised, the task(s) will run one more time.
-                                # However, because we've removed the directory from the watch list this will be a no-op,
-                                # and then the tasks will be dropped.
-                            end
-                            # Revise code as needed
-                            files = String[]
-                            mustnotify = false
-                            for file in srcfiles(pkgdata)
-                                fi = try
-                                    maybe_parse_from_cache!(pkgdata, file)
-                                catch err
-                                    # https://github.com/JuliaLang/julia/issues/42404
-                                    # Get the source-text from the package source instead
-                                    fi = fileinfo(pkgdata, file)
-                                    if isempty(fi.modexsigs) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
-                                        filep = joinpath(basedir(pkgdata), file)
-                                        src = read(filep, String)
-                                        topmod = first(keys(fi.modexsigs))
-                                        if parse_source!(fi.modexsigs, src, filep, topmod) === nothing
-                                            @error "failed to parse source text for $filep"
-                                        end
-                                        add_modexs!(fi, fi.cacheexprs)
-                                        empty!(fi.cacheexprs)
-                                        fi.parsed[] = true
-                                    end
-                                    fi
-                                end
-                                maybe_extract_sigs!(fi)
-                                push!(revision_queue, (pkgdata, file))
-                                push!(files, file)
-                                mustnotify = true
-                            end
-                            mustnotify && notify(revision_event)
-                            # Update the directory
-                            pkgdata.info.basedir = pkgdir
-                            # Restart watching, if applicable
-                            if has_writable_paths(pkgdata)
-                                init_watching(pkgdata, files)
-                            end
+                            push!(pathreplacements, basedir(pkgdata)=>pkgdir)
+                            switch_basepath(pkgdata, pkgdir)
+                        end
+                    end
+                end
+                # Update the paths in the watchlist
+                for (oldpath, newpath) in pathreplacements
+                    for (_, pkgdata) in pkgdatas
+                        if basedir(pkgdata) == oldpath
+                            switch_basepath(pkgdata, newpath)
                         end
                     end
                 end
@@ -473,6 +445,53 @@ function watch_manifest(mfile::String)
             @error "Error watching manifest" exception=(err, trim_toplevel!(catch_backtrace()))
         end
     end
+end
+
+function switch_basepath(pkgdata::PkgData, newpath::String)
+    # Stop all associated watching tasks
+    for dir in unique_dirs(srcfiles(pkgdata))
+        @debug "Pkg" _group="unwatch" dir=dir
+        @lock watched_files_lock delete!(watched_files, joinpath(basedir(pkgdata), dir))
+        # Note: if the file is revised, the task(s) will run one more time.
+        # However, because we've removed the directory from the watch list this will be a no-op,
+        # and then the tasks will be dropped.
+    end
+    # Revise code as needed
+    files = String[]
+    mustnotify = false
+    for file in srcfiles(pkgdata)
+        fi = try
+            maybe_parse_from_cache!(pkgdata, file)
+        catch err
+            # https://github.com/JuliaLang/julia/issues/42404
+            # Get the source-text from the package source instead
+            fi = fileinfo(pkgdata, file)
+            if isempty(fi.modexsigs) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
+                filep = joinpath(basedir(pkgdata), file)
+                src = read(filep, String)
+                topmod = first(keys(fi.modexsigs))
+                if parse_source!(fi.modexsigs, src, filep, topmod) === nothing
+                    @error "failed to parse source text for $filep"
+                end
+                add_modexs!(fi, fi.cacheexprs)
+                empty!(fi.cacheexprs)
+                fi.parsed[] = true
+            end
+            fi
+        end
+        maybe_extract_sigs!(fi)
+        push!(revision_queue, (pkgdata, file))
+        push!(files, file)
+        mustnotify = true
+    end
+    mustnotify && notify(revision_event)
+    # Update the directory
+    pkgdata.info.basedir = newpath
+    # Restart watching, if applicable
+    if has_writable_paths(pkgdata)
+        init_watching(pkgdata, files)
+    end
+    return nothing
 end
 
 function active_project_watcher()

@@ -1,15 +1,21 @@
 """
-    Revise.track(Base)
-    Revise.track(Core.Compiler)
-    Revise.track(stdlib)
+    Revise.track(Base; revise_throw::Bool=!isinteractive())
+    Revise.track(Core.Compiler; revise_throw::Bool=!isinteractive())
+    Revise.track(stdlib; revise_throw::Bool=!isinteractive())
 
 Track updates to the code in Julia's `base` directory, `base/compiler`, or one of its
-standard libraries.
+standard libraries. Calls `revise()` after tracking to ensure that any changes
+detected during tracking are applied immediately. Optionally, if `revise_throw` is
+`true`, `revise()` will throw if any exceptions are encountered while revising.
 """
-function track(mod::Module; modified_files=revision_queue)
-    id = PkgId(mod)
+function track(mod::Module; modified_files=revision_queue, revise_throw::Bool=!isinteractive())
+    id = Base.moduleroot(mod) == Core.Compiler ?
+        PkgId(mod, "Core.Compiler") :
+        PkgId(mod)
     modname = nameof(mod)
-    return _track(id, modname; modified_files=modified_files)
+    ret = _track(id, modname; modified_files=modified_files)
+    revise(; throw=revise_throw) # force revision so following calls in the same block work
+    return ret
 end
 
 const vstring = "v$(VERSION.major).$(VERSION.minor)"
@@ -61,7 +67,7 @@ function _track(id::PkgId, modname::Symbol; modified_files=revision_queue)
         if pkgdata === nothing
             pkgdata = PkgData(id, srcdir)
         end
-        lock(revise_lock) do
+        lock(revision_queue_lock) do
             for (submod, filename) in Iterators.drop(Base._included_files, 1)  # stepping through sysimg.jl rebuilds Base, omit it
                 ffilename = fixpath(filename)
                 inpath(ffilename, dirs) || continue
@@ -86,7 +92,7 @@ function _track(id::PkgId, modname::Symbol; modified_files=revision_queue)
         # Add the files to the watch list
         init_watching(pkgdata, srcfiles(pkgdata))
         # Save the result (unnecessary if already in pkgdatas, but doesn't hurt either)
-        pkgdatas[id] = pkgdata
+        @lock pkgdatas_lock pkgdatas[id] = pkgdata
     elseif modname === :Compiler
         compilerdir = normpath(joinpath(juliadir, "Compiler", "src"))
         compilerdir_pre_112 = normpath(joinpath(juliadir, "base", "compiler"))
@@ -139,7 +145,7 @@ function track_subdir_from_git!(pkgdata::PkgData, subdir::AbstractString; commit
     tree = git_tree(repo, commit)
     files = Iterators.filter(file->startswith(file, prefix) && endswith(file, ".jl"), keys(tree))
     ccall((:giterr_clear, :libgit2), Cvoid, ())  # necessary to avoid errors like "the global/xdg file 'attributes' doesn't exist: No such file or directory"
-    lock(revise_lock) do
+    lock(revision_queue_lock) do
         for file in files
             fullpath = joinpath(repo_path, file)
             rpath = relpath(fullpath, pkgdata)  # this might undo the above, except for Core.Compiler
@@ -155,11 +161,17 @@ function track_subdir_from_git!(pkgdata::PkgData, subdir::AbstractString; commit
             end
             fmod = get(juliaf2m, fullpath, Core.Compiler)  # Core.Compiler is not cached
             if fmod === Core.Compiler
-                endswith(fullpath, "compiler.jl") && continue  # defines the module, skip
+                endswith(fullpath, "compiler.jl") && continue  # defines the module (v1.11-), skip
+                endswith(fullpath, "/Compiler/src/Compiler.jl") && continue  # defines the module (v1.12+), skip
                 @static if isdefined(Core.Compiler, :EscapeAnalysis)
                     # after https://github.com/JuliaLang/julia/pull/43800
-                    if contains(fullpath, "compiler/ssair/EscapeAnalysis")
+                    if endswith(fullpath, "/compiler/ssair/EscapeAnalysis.jl") || contains(fullpath, "/Compiler/src/ssair/EscapeAnalysis.jl")
                         fmod = Core.Compiler.EscapeAnalysis
+                    end
+                end
+                @static if isdefined(Core.Compiler, :TrimVerifier)
+                    if endswith(fullpath, "/Compiler/src/verifytrim.jl")
+                        fmod = Core.Compiler.TrimVerifier
                     end
                 end
             end
@@ -179,7 +191,7 @@ function track_subdir_from_git!(pkgdata::PkgData, subdir::AbstractString; commit
         id = PkgId(pkgdata)
         CodeTracking._pkgfiles[id] = pkgdata.info
         init_watching(pkgdata, srcfiles(pkgdata))
-        pkgdatas[id] = pkgdata
+        @lock pkgdatas_lock pkgdatas[id] = pkgdata
     end
     return nothing
 end
@@ -193,7 +205,7 @@ const stdlib_names = Set([
     :Serialization, :SHA, :SharedArrays, :Sockets, :SparseArrays,
     :Statistics, :SuiteSparse, :Test, :Unicode, :UUIDs,
     :TOML, :Artifacts, :LibCURL_jll, :LibCURL, :MozillaCACerts_jll,
-    :Downloads, :Tar, :ArgTools, :NetworkOptions])
+    :Downloads, :Tar, :ArgTools, :NetworkOptions, :PCRE2_jll, :Zlib_jll])
 
 # This replacement is needed because the path written during compilation differs from
 # the git source path

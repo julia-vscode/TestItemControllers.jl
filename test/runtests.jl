@@ -1,6 +1,7 @@
 # REVISE: DO NOT PARSE   # For people with JULIA_REVISE_INCLUDE=1
 using Revise
 using Revise.CodeTracking
+using Revise.CodeTracking: MethodInfoKey
 using Revise.JuliaInterpreter
 using Test
 
@@ -11,6 +12,11 @@ import LibGit2
 using Revise.OrderedCollections: OrderedSet
 using Test: collect_test_logs
 using Base.CoreLogging: Debug,Info
+
+# Some test cases (especially those that redirect stderr during precompilation)
+# assume that dependency packages are already precompiled, so we make an
+# explicit `precompile()` call here to ensure this.
+Pkg.precompile()
 
 # In addition to using this for the "More arg-modifying macros" test below,
 # this package is used on CI to test what happens when you have multiple
@@ -255,7 +261,7 @@ const issue639report = []
         @test length(dvs) == 3
         (def, val) = dvs[1]
         @test isequal(Revise.unwrap(def), Revise.RelocatableExpr(:(square(x) = x^2)))
-        @test val == [Tuple{typeof(ReviseTest.square),Any}]
+        @test val == [Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.square),Any})]
         @test Revise.firstline(Revise.unwrap(def)).line == 5
         m = @which ReviseTest.square(1)
         @test m.line == 5
@@ -263,14 +269,14 @@ const issue639report = []
         @test Revise.RelocatableExpr(definition(m)) == Revise.unwrap(def)
         (def, val) = dvs[2]
         @test isequal(Revise.unwrap(def), Revise.RelocatableExpr(:(cube(x) = x^3)))
-        @test val == [Tuple{typeof(ReviseTest.cube),Any}]
+        @test val == [Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.cube),Any})]
         m = @which ReviseTest.cube(1)
         @test m.line == 7
         @test whereis(m) == (tmpfile, 7)
         @test Revise.RelocatableExpr(definition(m)) == Revise.unwrap(def)
         (def, val) = dvs[3]
         @test isequal(Revise.unwrap(def), Revise.RelocatableExpr(:(fourth(x) = x^4)))
-        @test val == [Tuple{typeof(ReviseTest.fourth),Any}]
+        @test val == [Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.fourth),Any})]
         m = @which ReviseTest.fourth(1)
         @test m.line == 9
         @test whereis(m) == (tmpfile, 9)
@@ -280,7 +286,7 @@ const issue639report = []
         @test length(dvs) == 5
         (def, val) = dvs[1]
         @test isequal(Revise.unwrap(def),  Revise.RelocatableExpr(:(mult2(x) = 2*x)))
-        @test val == [Tuple{typeof(ReviseTest.Internal.mult2),Any}]
+        @test val == [Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.Internal.mult2),Any})]
         @test Revise.firstline(Revise.unwrap(def)).line == 13
         m = @which ReviseTest.Internal.mult2(1)
         @test m.line == 11
@@ -288,7 +294,7 @@ const issue639report = []
         @test Revise.RelocatableExpr(definition(m)) == Revise.unwrap(def)
         (def, val) = dvs[2]
         @test isequal(Revise.unwrap(def), Revise.RelocatableExpr(:(mult3(x) = 3*x)))
-        @test val == [Tuple{typeof(ReviseTest.Internal.mult3),Any}]
+        @test val == [Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.Internal.mult3),Any})]
         m = @which ReviseTest.Internal.mult3(1)
         @test m.line == 14
         @test whereis(m) == (tmpfile, 14)
@@ -316,17 +322,20 @@ const issue639report = []
         cmpdiff(logs[4], "Eval"; deltainfo=(ReviseTest, :(cube(x) = x^3)))
         cmpdiff(logs[5], "Eval"; deltainfo=(ReviseTest, :(fourth(x) = x^4)))
         stmpfile = Symbol(tmpfile)
-        cmpdiff(logs[6], "LineOffset"; deltainfo=(Any[Tuple{typeof(ReviseTest.Internal.mult2),Any}], LineNumberNode(11,stmpfile)=>LineNumberNode(13,stmpfile)))
+        cmpdiff(logs[6], "LineOffset"; deltainfo=(Any[Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.Internal.mult2),Any})], LineNumberNode(11,stmpfile)=>LineNumberNode(13,stmpfile)))
         cmpdiff(logs[7], "Eval"; deltainfo=(ReviseTest.Internal, :(mult3(x) = 3*x)))
-        cmpdiff(logs[8], "LineOffset"; deltainfo=(Any[Tuple{typeof(ReviseTest.Internal.unchanged),Any}], LineNumberNode(18,stmpfile)=>LineNumberNode(19,stmpfile)))
-        cmpdiff(logs[9], "LineOffset"; deltainfo=(Any[Tuple{typeof(ReviseTest.Internal.unchanged2),Any}], LineNumberNode(20,stmpfile)=>LineNumberNode(21,stmpfile)))
+        cmpdiff(logs[8], "LineOffset"; deltainfo=(Any[Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.Internal.unchanged),Any})], LineNumberNode(18,stmpfile)=>LineNumberNode(19,stmpfile)))
+        cmpdiff(logs[9], "LineOffset"; deltainfo=(Any[Revise.SigInfo(nothing, Tuple{typeof(ReviseTest.Internal.unchanged2),Any})], LineNumberNode(20,stmpfile)=>LineNumberNode(21,stmpfile)))
         @test length(Revise.actions(rlogger)) == 6  # by default LineOffset is skipped
         @test length(Revise.actions(rlogger; line=true)) == 9
         @test_broken length(Revise.diffs(rlogger)) == 2
         io = PipeBuffer()
-        foreach(rec -> show(io, rec), rlogger.logs)
-        foreach(rec -> show(io, rec; verbose=false), rlogger.logs)
-        @test count("Revise.LogRecord", read(io, String)) > 8
+        foreach(rec -> (show(io, rec); println(io)), rlogger.logs)
+        str = String(take!(io))
+        @test occursin("Revise DeleteMethod: mult4(::Any)", str)
+        foreach(rec -> (show(IOContext(io, :verbose=>true), rec); println(io)), rlogger.logs)
+        str = String(take!(io))
+        @test count("Revise.LogRecord", str) > 8
         empty!(rlogger.logs)
 
         # Backtraces. Note this doesn't test the line-number correction
@@ -492,8 +501,8 @@ const issue639report = []
                 m3 = first(methods(eval(fn3)))
                 m3file = joinpath(dn, "subdir", "file3.jl")
                 @test whereis(m3) == (m3file, 1)
-                @test signatures_at(m3file, 1) == [m3.sig]
-                @test signatures_at(eval(Symbol(modname)), joinpath("src", "subdir", "file3.jl"), 1) == [m3.sig]
+                @test signatures_at(m3file, 1) == [Revise.SigInfo(nothing, m3.sig)]
+                @test signatures_at(eval(Symbol(modname)), joinpath("src", "subdir", "file3.jl"), 1) == [Revise.SigInfo(nothing, m3.sig)]
 
                 id = Base.PkgId(eval(Symbol(modname)))   # for testing #596
                 pkgdata = Revise.pkgdatas[id]
@@ -517,6 +526,10 @@ const issue639report = []
 
                     end
                     """)  # just for fun we skipped the whitespace
+                Revise.active[] = false
+                @yry()
+                @eval @test $(fn1)() == 1
+                Revise.active[] = true
                 @yry()
                 fi = pkgdata.fileinfos[1]
                 @test fi.extracted[]          # issue 596
@@ -1396,7 +1409,7 @@ const issue639report = []
             """)
         @yry()
         @test MacroSigs.blah() == 1
-        @test haskey(CodeTracking.method_info, (@which MacroSigs.blah()).sig)
+        @test haskey(CodeTracking.method_info, MethodInfoKey(@which MacroSigs.blah()))
         rm_precompile("MacroSigs")
 
         # Issue #568 (a macro *execution* bug)
@@ -1894,8 +1907,8 @@ const issue639report = []
         ex2 = :(methspecificity(x::Integer) = 2)
         Core.eval(ReviseTestPrivate, ex1)
         Core.eval(ReviseTestPrivate, ex2)
-        exsig1 = Revise.RelocatableExpr(ex1)=>[Tuple{typeof(ReviseTestPrivate.methspecificity),Int}]
-        exsig2 = Revise.RelocatableExpr(ex2)=>[Tuple{typeof(ReviseTestPrivate.methspecificity),Integer}]
+        exsig1 = Revise.RelocatableExpr(ex1) => [Revise.SigInfo(nothing, Tuple{typeof(ReviseTestPrivate.methspecificity),Int})]
+        exsig2 = Revise.RelocatableExpr(ex2) => [Revise.SigInfo(nothing, Tuple{typeof(ReviseTestPrivate.methspecificity),Integer})]
         f_old, f_new = Revise.ExprsSigs(exsig1, exsig2), Revise.ExprsSigs(exsig2)
         Revise.delete_missing!(f_old, f_new)
         m = @which ReviseTestPrivate.methspecificity(1)
@@ -2933,7 +2946,7 @@ const issue639report = []
     do_test("Recipes") && @testset "Recipes" begin
         # https://github.com/JunoLab/Juno.jl/issues/257#issuecomment-473856452
         meth = @which gcd(10, 20)
-        sigs = signatures_at(Base.find_source_file(String(meth.file)), meth.line)  # this should track Base
+        signatures_at(Base.find_source_file(String(meth.file)), meth.line)  # this should track Base
 
         # Tracking Base
         # issue #250
@@ -3083,6 +3096,119 @@ const issue639report = []
         @test B670.y == 7
         rm_precompile("B670")
     end
+
+    do_test("External method tables") && @testset "External method tables" begin
+        function retval(m)
+            src = Base.uncompressed_ast(m)
+            i = findfirst(!isnothing, src.code)
+            node = src.code[i]::Core.ReturnNode
+            node.val
+        end
+
+        testdir = newtestdir()
+
+        unique_name(base) = Symbol(replace(lstrip(String(gensym(base)), '#'), '#' => '_'))
+        first_revision(name) = """
+            module $name
+
+            Base.Experimental.@MethodTable(method_table)
+            Base.Experimental.@MethodTable(method_table_2)
+            get_method_table() = method_table
+
+            macro override(ex) esc(:(Base.Experimental.@overlay \$method_table \$ex)) end
+            macro override_2(ex) esc(:(Base.Experimental.@overlay $name.method_table \$ex)) end
+            macro override_3(ex) esc(:(Base.Experimental.@overlay get_method_table() \$ex)) end
+
+            foo() = 1
+
+            @override print(x) = "print"
+            @override show(x) = "show"
+            @override cos(x) = "cos"
+            @override_2 sin(x) = "sin"
+            @override_3 sincos(x) = "sincos"
+            Base.Experimental.@overlay method_table_2 foo() = 2
+
+            bar() = foo()
+            baz() = bar()
+
+            end
+            """
+        second_revision(name) = """
+            module $name
+
+            Base.Experimental.@MethodTable(method_table)
+            Base.Experimental.@MethodTable(method_table_2)
+            get_method_table() = method_table
+
+            macro override(ex) esc(:(Base.Experimental.@overlay \$method_table \$ex)) end
+            macro override_2(ex) esc(:(Base.Experimental.@overlay $name.method_table \$ex)) end
+            macro override_3(ex) esc(:(Base.Experimental.@overlay get_method_table() \$ex)) end
+
+            foo() = 1
+
+            @override print(x) = "print"
+            # @override show(x) = "show"
+            @override cos(x) = "sin"
+            @override_2 sin(x) = "cos"
+            @override_3 sincos(x) = "cossin"
+            Base.Experimental.@overlay method_table_2 foo() = 3
+
+            bar() = foo() + 1
+            # baz() = bar()
+
+            end
+            """
+
+        function test_first_revision(mod::Module)
+            @test mod.foo() == 1
+            @test mod.bar() == 1
+            @test length(methods(mod.baz)) == 1
+            (; ms) = Base.MethodList(mod.method_table)
+            @test length(ms) == 5 # cos/sin/sincos/print/show
+            (; ms) = Base.MethodList(mod.method_table_2)
+            @test length(ms) == 1 # foo
+            @test retval(first(ms)) == 2
+        end
+
+        function test_second_revision(mod::Module)
+            current_world_age = isdefined(Base, :tls_world_age) ? Base.tls_world_age() : Base.get_world_counter()
+            @test mod.foo() == 1
+            @test mod.bar() == 2
+            @test isempty(methods(mod.baz))
+            (; ms) = Base.MethodList(mod.method_table)
+            @test length(ms) == 8 # cos/sin/sincos x2 + print/show
+            VERSION < v"1.12-" && @test count(x -> x.deleted_world < current_world_age, ms) == 4 # deleted cos/sin/sincos/show
+            (; ms) = Base.MethodList(mod.method_table_2)
+            @test length(ms) == 2 # foo x2
+            VERSION < v"1.12-" && @test count(x -> x.deleted_world < current_world_age, ms) == 1 # deleted foo
+            @test retval(first(ms)) == 3
+        end
+
+        name = unique_name(:ExternalMT)
+        dn = joinpath(testdir, "$name", "src")
+        mkpath(dn)
+        write(joinpath(dn, "$name.jl"), first_revision(name))
+        sleep(mtimedelay)
+        @eval import $name
+        sleep(mtimedelay)
+        test_first_revision(@eval $name)
+        write(joinpath(dn, "$name.jl"), second_revision(name))
+        @yry()
+        test_second_revision(@eval $name)
+
+        file = tempname() * ".jl"
+        name = unique_name(:ExternalMT_includet)
+        write(file, first_revision(name))
+        sleep(mtimedelay)
+        Revise.track(@__MODULE__(), file; mode=:includet)
+        sleep(mtimedelay)
+        @eval import .$name
+        sleep(mtimedelay)
+        test_first_revision(@eval $name)
+        write(file, second_revision(name))
+        @yry()
+        test_second_revision(@eval $name)
+    end
 end
 
 do_test("Utilities") && @testset "Utilities" begin
@@ -3096,13 +3222,25 @@ do_test("Utilities") && @testset "Utilities" begin
 end
 
 do_test("Switching free/dev") && @testset "Switching free/dev" begin
-    function make_a2d(path, val, mode="r"; generate=true)
+    function make_a2d(path, val, mode="r"; generate=true, uuid=nothing)
         # Create a new "read-only package" (which mimics how Pkg works when you `add` a package)
+        # use generate=false and copy the Project.toml to use the same UUID
         cd(path) do
             pkgpath = normpath(joinpath(path, "A2D"))
             srcpath = joinpath(pkgpath, "src")
             if generate
                 Pkg.generate("A2D")
+                projpath = joinpath(pkgpath, "Project.toml")
+                open(projpath, "a") do io
+                    write(io, """
+
+                    [weakdeps]
+                    Dummy = "$uuid"
+
+                    [extensions]
+                    A2DDummyExt = "Dummy"
+                    """)
+                end
             else
                 mkpath(srcpath)
             end
@@ -3110,9 +3248,20 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
             write(filepath, """
                 module A2D
                 f() = $val
+                function g end
                 end
                 """)
             chmod(filepath, mode=="r" ? 0o100444 : 0o100644)
+            mkdir(joinpath(pkgpath, "ext"))
+            extpath = joinpath(pkgpath, "ext", "A2DDummyExt.jl")
+            write(extpath, """
+                module A2DDummyExt
+                using A2D
+                using Dummy
+                A2D.g() = $val
+                end
+                """)
+            chmod(extpath, mode=="r" ? 0o100444 : 0o100644)
             return pkgpath
         end
     end
@@ -3126,12 +3275,21 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
     Base.ACTIVE_PROJECT[] = joinpath(depot, "environments", "v$(VERSION.major).$(VERSION.minor)", "Project.toml")
     mkpath(dirname(Base.ACTIVE_PROJECT[]))
     write(Base.ACTIVE_PROJECT[], "[deps]")
-    ropkgpath = make_a2d(depot, 1)
+    cd(depot) do
+        Pkg.generate("Dummy")
+    end
+    dummypath = joinpath(depot, "Dummy")
+    Pkg.develop(PackageSpec(path=dummypath))
+    dummyuuid = match(r"uuid = \"([0-9a-f].*)\"", read(joinpath(dummypath, "Project.toml"), String)).captures[1]
+    ropkgpath = make_a2d(depot, 1; uuid=dummyuuid)
     Pkg.develop(PackageSpec(path=ropkgpath))
     sleep(mtimedelay)
     @eval using A2D
     sleep(mtimedelay)
     @test Base.invokelatest(A2D.f) == 1
+    @test_throws MethodError Base.invokelatest(A2D.g)
+    @eval using Dummy
+    @test Base.invokelatest(A2D.g) == 1
     for dir in keys(Revise.watched_files)
         @test !startswith(dir, ropkgpath)
     end
@@ -3145,9 +3303,11 @@ do_test("Switching free/dev") && @testset "Switching free/dev" begin
     Pkg.develop(PackageSpec(path=pkgdevpath))
     @yry()
     @test Base.invokelatest(A2D.f) == 2
+    @test Base.invokelatest(A2D.g) == 2
     Pkg.develop(PackageSpec(path=ropkgpath))
     @yry()
     @test Base.invokelatest(A2D.f) == 1
+    @test Base.invokelatest(A2D.g) == 1
     for dir in keys(Revise.watched_files)
         @test !startswith(dir, ropkgpath)
     end
@@ -3941,4 +4101,7 @@ end
 
 # Run this test in a separate julia process, since it messes with projects, and we don't want to have to
 # worry about making sure it resets cleanly.
-do_test("Switch Versions") && @test success(pipeline(`$(Base.julia_cmd()) switch_version.jl`, stderr=stderr))
+do_test("Switch Versions") && let
+    switch_version = normpath(@__DIR__, "switch_version.jl")
+    @test success(pipeline(`$(Base.julia_cmd()) $switch_version`, stderr=stderr))
+end
