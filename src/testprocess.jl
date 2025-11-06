@@ -210,25 +210,27 @@ function create_testprocess(
                     state = :testrun_waiting_for_precompile_done
                 end
             elseif msg.event == :precompile_by_other_proc_done
-                state == :testrun_waiting_for_precompile_done || error("Invalid state transition from $state.")
-                state = :activating_env
+                if state != :running_tests # If we are already running tests we ignore this message                    
+                    state == :testrun_waiting_for_precompile_done || error("Invalid state transition from $state.")
+                    state = :activating_env
 
-                precompile_done = true
-                if !is_precompile_process && jl_process !== nothing
-                    @async try
-                        JSONRPC.send(
-                            endpoint,
-                            TestItemServerProtocol.testserver_activate_env_request_type,
-                            TestItemServerProtocol.ActivateEnvParams(
-                                projectUri=something(env.project_uri, missing),
-                                packageUri=env.package_uri,
-                                packageName=env.package_name
+                    precompile_done = true
+                    if !is_precompile_process && jl_process !== nothing
+                        @async try
+                            JSONRPC.send(
+                                endpoint,
+                                TestItemServerProtocol.testserver_activate_env_request_type,
+                                TestItemServerProtocol.ActivateEnvParams(
+                                    projectUri=something(env.project_uri, missing),
+                                    packageUri=env.package_uri,
+                                    packageName=env.package_name
+                                )
                             )
-                        )
 
-                        put!(msg_channel, (;event=:testprocess_activated))
-                    catch err
-                        Base.display_error(err, catch_backtrace())
+                            put!(msg_channel, (;event=:testprocess_activated))
+                        catch err
+                            Base.display_error(err, catch_backtrace())
+                        end
                     end
                 end
             elseif msg.event == :testprocess_activated
