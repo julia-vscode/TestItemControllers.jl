@@ -164,7 +164,7 @@ function create_testprocess(
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :start
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition")
-                state = :testrun_starting
+                state = :testprocess_starting
 
                 julia_proc_cs === nothing || error("Invalid state for julia_proc_cs")
                 julia_proc_cs = CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
@@ -177,6 +177,9 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :end_testrun
+                if state == :running_tests
+                    @info "This should not happen" test_run_id queued_tests_n queued_test_cancels_n length(finished_testitems)
+                end
                 state == :testrun_idle || error("Invalid state transition from $state")
                 state = :idle
 
@@ -184,11 +187,13 @@ function create_testprocess(
                 test_setups = nothing
                 coverage_root_uris = nothing
             elseif msg.event == :testprocess_launched
-                state == :testrun_starting || error("Invalid state transition.")
+                state == :testprocess_starting || error("Invalid state transition.")
 
                 jl_process = msg.jl_process
                 endpoint = msg.endpoint
-                if is_precompile_process || precompile_done
+                if testrun_channel===nothing
+                    state = :idle
+                elseif is_precompile_process || precompile_done
                     state = is_precompile_process ? :testrun_precompiling : :testrun_activating
                     @async try
                         JSONRPC.send(
@@ -342,7 +347,7 @@ function create_testprocess(
                     catch err
                         Base.display_error(err, catch_backtrace())
                     end
-                elseif state == :starting
+                elseif state == :testprocess_starting
                     testitems_to_run_when_ready = msg.testitems
                 else
                     error("Invalid state transition from $state on $testprocess_id.")
