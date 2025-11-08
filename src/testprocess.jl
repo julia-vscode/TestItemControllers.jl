@@ -215,8 +215,7 @@ function create_testprocess(
                     state = :testrun_waiting_for_precompile_done
                 end
             elseif msg.event == :precompile_by_other_proc_done
-                if state != :running_tests # If we are already running tests we ignore this message                    
-                    state == :testrun_waiting_for_precompile_done || error("Invalid state transition from $state.")
+                if state == :testrun_waiting_for_precompile_done             
                     state = :activating_env
 
                     precompile_done = true
