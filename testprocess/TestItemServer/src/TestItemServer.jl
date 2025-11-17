@@ -336,7 +336,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
     elapsed_time = UInt64(0)
 
-    const inner_test_function = () -> begin
+    inner_test_function = () -> begin
         t0 = time_ns()
         try
             withpath(filepath) do
