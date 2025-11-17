@@ -333,68 +333,79 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
     code = string('\n'^(params.line-1), ' '^(params.column-1), params.code)
 
-    ts = Test.DefaultTestSet("$filepath:$(params.name)")
-
-    Test.push_testset(ts)
 
     elapsed_time = UInt64(0)
 
-    t0 = time_ns()
-    try
-        withpath(filepath) do
+    const inner_test_function = () -> begin
+        t0 = time_ns()
+        try
+            withpath(filepath) do
 
-            if mode == "Debug"
-                debug_session = wait_for_debug_session()
-                DebugAdapter.debug_code(debug_session, mod, code, filepath)
-            else
-                mode == "Coverage" && clear_coverage_data()
-                try
-                    Base.invokelatest(include_string, mod, code, filepath)
-                finally
-                    mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
+                if mode == "Debug"
+                    debug_session = wait_for_debug_session()
+                    DebugAdapter.debug_code(debug_session, mod, code, filepath)
+                else
+                    mode == "Coverage" && clear_coverage_data()
+                    try
+                        Base.invokelatest(include_string, mod, code, filepath)
+                    finally
+                        mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
+                    end
                 end
+                elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
             end
+        catch err
             elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
-        end
-    catch err
-        elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
 
-        Test.pop_testset()
+            Test.pop_testset()
 
-        bt = catch_backtrace()
-        st = stacktrace(bt)
+            bt = catch_backtrace()
+            st = stacktrace(bt)
 
-        error_message = format_error_message(err, bt)
+            error_message = format_error_message(err, bt)
 
 
 
-        if err isa LoadError
-            error_filepath = err.file
-            error_line = err.line
-        else
-            error_filepath =  string(st[1].file)
-            error_line = st[1].line
-        end
+            if err isa LoadError
+                error_filepath = err.file
+                error_line = err.line
+            else
+                error_filepath =  string(st[1].file)
+                error_line = st[1].line
+            end
 
-        return (
-            TestItemServerProtocol.errored_notification_type,
-            TestItemServerProtocol.ErroredParams(
-                testItemId = params.id,
-                messages = [
-                    TestItemServerProtocol.TestMessage(
-                        error_message,
-                        TestItemServerProtocol.Location(
-                            isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
-                            TestItemServerProtocol.Position(max(1, error_line), 1)
+            return (
+                TestItemServerProtocol.errored_notification_type,
+                TestItemServerProtocol.ErroredParams(
+                    testItemId = params.id,
+                    messages = [
+                        TestItemServerProtocol.TestMessage(
+                            error_message,
+                            TestItemServerProtocol.Location(
+                                isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
+                                TestItemServerProtocol.Position(max(1, error_line), 1)
+                            )
                         )
-                    )
-                ],
-                duration = missing
+                    ],
+                    duration = missing
+                )
             )
-        )
+        end
     end
 
-    ts = Test.pop_testset()
+    ts = Test.DefaultTestSet("$filepath:$(params.name)")
+
+    @static if VERSION < v"1.13.0-"
+        Test.push_testset(ts)
+
+        inner_test_function()
+
+        ts = Test.pop_testset()
+    else
+        Test.@with_testset ts begin
+            inner_test_function()
+        end
+    end
 
     try
         Test.finish(ts)
