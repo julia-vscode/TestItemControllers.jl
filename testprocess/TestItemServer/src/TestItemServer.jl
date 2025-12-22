@@ -286,7 +286,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
         try
             if testsetup_details.kind==:module
-                Core.eval(mod, :(using ..Testsetups: $(Symbol(i))))
+                Core.eval(mod, :(using ..Testsetups.$(Symbol(i))))
             elseif testsetup_details.kind==:snippet
                 testsnippet_filepath = uri2filepath(testsetup_details.uri)
                 testsnippet_code = string('\n'^(testsetup_details.line-1), ' '^(testsetup_details.column-1), testsetup_details.code)
