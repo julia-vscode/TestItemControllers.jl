@@ -354,6 +354,8 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 end
                 elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
             end
+
+            return nothing
         catch err
             elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
 
@@ -398,12 +400,20 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
     @static if VERSION < v"1.13.0-"
         Test.push_testset(ts)
 
-        inner_test_function()
+        ret = inner_test_function()
+
+        if ret !== nothing
+            return ret
+        end
 
         ts = Test.pop_testset()
     else
         Test.@with_testset ts begin
-            inner_test_function()
+            ret = inner_test_function()
+
+            if ret !== nothing
+                return ret
+            end
         end
     end
 
