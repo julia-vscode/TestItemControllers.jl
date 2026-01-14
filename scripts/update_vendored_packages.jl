@@ -21,7 +21,8 @@ packages = Dict(
     "Revise" => "timholy/Revise.jl",
     "TestEnv" => "JuliaTesting/TestEnv.jl",
     "URIParser" => "JuliaWeb/URIParser.jl",
-    "CancellationTokens" => "davidanthoff/CancellationTokens.jl"
+    "CancellationTokens" => "davidanthoff/CancellationTokens.jl",
+    "Preferences" => "JuliaPackaging/Preferences.jl",
 )
 
 latest_versions = Dict{String,VersionNumber}()
@@ -47,8 +48,8 @@ for (pkg,github_location) in packages
     latest_version = latest_versions[pkg]
     current_version = current_versions[pkg]
 
-    
-    if latest_version != current_version        
+
+    if latest_version != current_version
         run(
             addenv(
                 Cmd(
