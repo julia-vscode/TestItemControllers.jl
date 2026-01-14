@@ -13,5 +13,5 @@
 
     shutdown(tic)
 
-    fetch(finished)
+    @test fetch(finished)
 end

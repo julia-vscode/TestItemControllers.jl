@@ -2,6 +2,10 @@ include("../../../packages/TestEnv/src/TestEnv.jl")
 include("../../../packages/URIParser/src/URIParser.jl")
 include("../../../packages/JSON/src/JSON.jl")
 
+if VERSION >= v"1.10.0"
+    include("../../../packages/Preferences/src/Preferences.jl")
+end
+
 if VERSION >= v"1.6.0"
     include("../../../packages/OrderedCollections/src/OrderedCollections.jl")
 else
@@ -73,7 +77,8 @@ end
 
 module Revise
     @static if VERSION >= v"1.10.0"
-        using ..OrderedCollections, ..CodeTracking, ..JuliaInterpreter, ..LoweredCodeUtils
+        using TOML
+        using ..OrderedCollections, ..CodeTracking, ..JuliaInterpreter, ..LoweredCodeUtils, ..Preferences
 
         using ...CodeTracking: PkgFiles, basedir, srcfiles, basepath, MethodInfoKey
         using ...JuliaInterpreter: Compiled, Frame, Interpreter, LineTypes, RecursiveInterpreter
