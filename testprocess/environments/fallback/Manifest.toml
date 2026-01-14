@@ -268,7 +268,7 @@ version = "1.11.0"
     julia_version = "1.14.0-DEV.1550"
 
 [[deps.TestItemServer]]
-deps = ["Base64", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "REPL", "Random", "Sockets", "Test", "UUIDs", "Unicode"]
+deps = ["Base64", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "REPL", "Random", "Sockets", "TOML", "Test", "UUIDs", "Unicode"]
 path = "../../TestItemServer"
 uuid = "1076c532-7f93-4758-ac65-93afa8eae143"
 version = "1.0.0"
