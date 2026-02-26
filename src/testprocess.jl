@@ -178,7 +178,7 @@ function create_testprocess(
                 end
             elseif msg.event == :end_testrun
                 if state == :running_tests
-                    @info "This should not happen" test_run_id queued_tests_n queued_test_cancels_n length(finished_testitems)
+                    @info "This should not happen" queued_tests_n queued_test_cancels_n length(finished_testitems)
                 end
                 state == :testrun_idle || error("Invalid state transition from $state")
                 state = :idle
@@ -215,7 +215,7 @@ function create_testprocess(
                     state = :testrun_waiting_for_precompile_done
                 end
             elseif msg.event == :precompile_by_other_proc_done
-                if state == :testrun_waiting_for_precompile_done             
+                if state == :testrun_waiting_for_precompile_done
                     state = :activating_env
 
                     precompile_done = true
