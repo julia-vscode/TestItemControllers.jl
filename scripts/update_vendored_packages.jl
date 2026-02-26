@@ -11,7 +11,7 @@ Base.shred!(creds.password)
 
 packages = Dict(
     "CodeTracking" => "timholy/CodeTracking.jl",
-    "CoverageTools" => "JuliaCI/CoverageTools.jl",
+    # "CoverageTools" => "JuliaCI/CoverageTools.jl", # We skip this as newer versions have a dependency on JuliaSyntax and that will require more work to incorporate
     "DebugAdapter" => "julia-vscode/DebugAdapter.jl",
     # "JSON" => "", We skip this as we want to stay on an old version that has one less extra dependency
     "JSONRPC" => "julia-vscode/JSONRPC.jl",
