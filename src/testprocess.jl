@@ -55,7 +55,7 @@ function create_testprocess(
     testprocess_id = string(UUIDs.uuid4())
     msg_channel = Channel(Inf)
 
-    @async try
+    Base.ScopedValues.@with logging_node => "tp_$(testprocess_id[1:5])" @async try
         # These are not nothing while a testrun is going on
         testrun_channel = nothing
         test_setups = nothing
@@ -82,7 +82,7 @@ function create_testprocess(
 
         while true
             msg = take!(msg_channel)
-            @debug "Test process new message" msg
+            @debug "Msg $(msg.event)" msg queued_tests_n queued_test_cancels_n length(finished_testitems)
 
             if msg.event == :shutdown
                 CancellationTokens.cancel(cs)
@@ -178,7 +178,7 @@ function create_testprocess(
                 end
             elseif msg.event == :end_testrun
                 if state == :running_tests
-                    @info "This should not happen" queued_tests_n queued_test_cancels_n length(finished_testitems)
+                    @error "This should not happen" queued_tests_n queued_test_cancels_n length(finished_testitems)
                 end
                 state == :testrun_idle || error("Invalid state transition from $state")
                 state = :idle

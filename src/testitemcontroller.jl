@@ -74,6 +74,7 @@ function Base.run(
     )
     while true
         msg = take!(controller.msg_channel)
+        @debug "Msg $(msg.event)" msg
 
         if msg.event == :shutdown
             for i in Iterators.flatten(values(controller.testprocesses))
@@ -320,334 +321,337 @@ function execute_testrun(
 
     @assert length(profiles) == 1 "Currently one must pass one test profile"
 
-    @info "Creating new test run"
+    Base.ScopedValues.@with logging_node => "testrun_$(testrun_id[1:5])" begin
 
-    state = :created
+        @info "Creating new test run"
 
-    testrun_msg_queue = Channel{Any}(Inf)
-    controller.testrun_msg_channels[testrun_id] = testrun_msg_queue
-    our_procs = nothing
+        state = :created
 
-    valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
-    test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
+        testrun_msg_queue = Channel{Any}(Inf)
+        controller.testrun_msg_channels[testrun_id] = testrun_msg_queue
+        our_procs = nothing
 
-    stolen_testitem_ids_by_proc_id = Dict{String,Vector{String}}()
+        valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
+        test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
 
-    testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
+        stolen_testitem_ids_by_proc_id = Dict{String,Vector{String}}()
 
-    env_content_hash_by_env = Dict{TestEnvironment,String}()
+        testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
 
-    for i in values(valid_test_items)
-        te = TestEnvironment(
-            i.project_uri,
-            i.package_uri,
-            i.package_name,
-            profiles[1].julia_cmd,
-            profiles[1].julia_args,
-            profiles[1].julia_num_threads,
-            profiles[1].mode,
-            profiles[1].julia_env
-        )
+        env_content_hash_by_env = Dict{TestEnvironment,String}()
 
-        testitems = get!(testitem_ids_by_env, te) do
-            String[]
-        end
+        for i in values(valid_test_items)
+            te = TestEnvironment(
+                i.project_uri,
+                i.package_uri,
+                i.package_name,
+                profiles[1].julia_cmd,
+                profiles[1].julia_args,
+                profiles[1].julia_num_threads,
+                profiles[1].mode,
+                profiles[1].julia_env
+            )
 
-        push!(testitems, i.id)
-
-        if haskey(env_content_hash_by_env, te)
-            if env_content_hash_by_env[te] != i.env_content_hash
-                error("This is invalid.")
+            testitems = get!(testitem_ids_by_env, te) do
+                String[]
             end
-        else
-            env_content_hash_by_env[te] = i.env_content_hash
-        end
-    end
 
-    testitem_ids_by_env_chunked = Dict{TestEnvironment,Vector{Vector{String}}}()
+            push!(testitems, i.id)
 
-    for (k,v) in pairs(testitem_ids_by_env)
-        as_share = length(v)/length(valid_test_items)
-
-        n_procs = min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items))
-
-        chunks =  makechunks(v, n_procs)
-
-        testitem_ids_by_env_chunked[k] = chunks
-    end
-
-    # Finally, we send error notifications for all test items that didn't have a package
-    for i in test_items_without_package
-        testitem_failed_callback(
-            testrun_id,
-            i.id,
-            TestItemControllerProtocol.TestMessage[
-                TestItemControllerProtocol.TestMessage(
-                    message = "Test item '$(i.label)' is not inside a Julia package. Test items must be inside a package to be run.",
-                    expectedOutput = missing,
-                    actualOutput = missing,
-                    uri = i.uri,
-                    line = i.line,
-                    column = i.column
-                )
-            ],
-            missing
-        )
-    end
-
-    state = :procs_requested
-
-    put!(
-        controller.msg_channel,
-        (
-            event = :get_procs_for_testrun,
-            proc_count_by_env = Dict(k=>length(v) for (k,v) in testitem_ids_by_env_chunked),
-            env_content_hash_by_env = env_content_hash_by_env,
-            test_setups = [
-                TestItemServerProtocol.TestsetupDetails(
-                    packageUri = something(i.package_uri, missing),
-                    name = i.name,
-                    kind = i.kind,
-                    uri = i.uri,
-                    line = i.line,
-                    column = i.column,
-                    code = i.code
-                ) for i in test_setups],
-            coverage_root_uris = profiles[1].coverage_root_uris,
-            testrun_msg_queue = testrun_msg_queue
-        )
-    )
-
-    testitem_ids_by_proc = Dict{String,Vector{String}}()
-
-    coverage_results = missing
-
-    processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
-
-    while true
-        msg = take!(testrun_msg_queue)
-        @debug "Testrun msg" msg
-
-        if msg.source==:controller
-            if msg.msg.event==:procs_acquired
-                state == :procs_requested || error("Invalid state transition from $state")
-                our_procs = msg.msg.procs
-
-                # Now distribute test items over test processes
-                for (k,v) in pairs(our_procs)
-                    for proc in v
-                        stolen_testitem_ids_by_proc_id[proc.id] = String[]
-                        testitem_ids_by_proc[proc.id] = pop!(testitem_ids_by_env_chunked[k])
-                    end
+            if haskey(env_content_hash_by_env, te)
+                if env_content_hash_by_env[te] != i.env_content_hash
+                    error("This is invalid.")
                 end
-
-                state = :all_procs_acquired
-
-                for i in processes_that_are_ready
-                    put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
-                end
-            elseif msg.msg.event==:cancel_test_run
-                for i in Iterators.flatten(values(our_procs))
-                    put!(i.msg_channel, (; event=:cancel_test_run))
-                end
-
-                # TODO What then?
             else
-                error("Unknown message")
+                env_content_hash_by_env[te] = i.env_content_hash
             end
-        elseif msg.source==:testprocess
-            if msg.msg.event == :ready_to_run_testitems
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+        end
 
-                if state == :all_procs_acquired
-                    put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
-                else
-                    push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
-                end
-            elseif msg.msg.event == :attach_debugger
-                attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
-            elseif msg.msg.event == :precompile_done
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+        testitem_ids_by_env_chunked = Dict{TestEnvironment,Vector{Vector{String}}}()
 
-                for i in our_procs[msg.msg.env]
-                    if i.id !== msg.msg.testprocess_id
-                        put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
-                    end
-                end
-            elseif msg.msg.event == :started
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+        for (k,v) in pairs(testitem_ids_by_env)
+            as_share = length(v)/length(valid_test_items)
 
-                testitem_started_callback(
-                    testrun_id,
-                    msg.msg.testitemid
-                )
-            elseif msg.msg.event == :append_output
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+            n_procs = min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items))
 
-                append_output_callback(
-                    testrun_id,
-                    msg.msg.testitemid,
-                    msg.msg.output
-                )
-            elseif msg.msg.event in (:passed, :failed, :errored, :skipped_stolen)
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+            chunks =  makechunks(v, n_procs)
 
-                idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
-                if msg.msg.event == :skipped_stolen
-                    deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], idx)
-                else
-                    if idx === nothing
-                        delete!(valid_test_items, msg.msg.testitemid)
-                        idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
-                        deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], idx)
+            testitem_ids_by_env_chunked[k] = chunks
+        end
 
-                        if msg.msg.event == :passed
-                            testitem_passed_callback(
-                                testrun_id,
-                                msg.msg.testitemid,
-                                msg.msg.duration
-                            )
+        # Finally, we send error notifications for all test items that didn't have a package
+        for i in test_items_without_package
+            testitem_failed_callback(
+                testrun_id,
+                i.id,
+                TestItemControllerProtocol.TestMessage[
+                    TestItemControllerProtocol.TestMessage(
+                        message = "Test item '$(i.label)' is not inside a Julia package. Test items must be inside a package to be run.",
+                        expectedOutput = missing,
+                        actualOutput = missing,
+                        uri = i.uri,
+                        line = i.line,
+                        column = i.column
+                    )
+                ],
+                missing
+            )
+        end
 
-                            if msg.msg.coverage !== missing
-                                file_coverage = get!(controller.coverage, testrun_id) do
-                                    CoverageTools.FileCoverage[]
-                                end
-                                append!(file_coverage, map(i->CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.msg.coverage))
-                            end
-                        elseif msg.msg.event == :failed
-                            testitem_failed_callback(
-                                testrun_id,
-                                msg.msg.testitemid,
-                                TestItemControllerProtocol.TestMessage[
-                                    TestItemControllerProtocol.TestMessage(
-                                        message = i.message,
-                                        expectedOutput = i.expectedOutput,
-                                        actualOutput = i.actualOutput,
-                                        uri = i.location.uri,
-                                        line = i.location.position.line,
-                                        column = i.location.position.character
-                                    ) for i in msg.msg.messages
-                                ],
-                                missing
-                            )
-                        elseif msg.msg.event == :errored
-                            testitem_errored_callback(
-                                testrun_id,
-                                msg.msg.testitemid,
-                                TestItemControllerProtocol.TestMessage[
-                                    TestItemControllerProtocol.TestMessage(
-                                        message = i.message,
-                                        expectedOutput = missing,
-                                        actualOutput = missing,
-                                        uri = i.location.uri,
-                                        line = i.location.position.line,
-                                        column = i.location.position.character
-                                    ) for i in msg.msg.messages
-                                ],
-                                missing
-                            )
-                        end
-                    end
-                end
+        state = :procs_requested
 
-                # Stealing logic
-                if length(testitem_ids_by_proc[msg.msg.test_process_id]) == 0 && length(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id]) == 0
-                    # First we find the test process instance and test env
-                    test_process = nothing
-                    test_processes_in_same_env = nothing
-                    test_env = nothing
+        put!(
+            controller.msg_channel,
+            (
+                event = :get_procs_for_testrun,
+                proc_count_by_env = Dict(k=>length(v) for (k,v) in testitem_ids_by_env_chunked),
+                env_content_hash_by_env = env_content_hash_by_env,
+                test_setups = [
+                    TestItemServerProtocol.TestsetupDetails(
+                        packageUri = something(i.package_uri, missing),
+                        name = i.name,
+                        kind = i.kind,
+                        uri = i.uri,
+                        line = i.line,
+                        column = i.column,
+                        code = i.code
+                    ) for i in test_setups],
+                coverage_root_uris = profiles[1].coverage_root_uris,
+                testrun_msg_queue = testrun_msg_queue
+            )
+        )
+
+        testitem_ids_by_proc = Dict{String,Vector{String}}()
+
+        coverage_results = missing
+
+        processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
+
+        while true
+            msg = take!(testrun_msg_queue)
+            @debug "Msg $(msg.source):$(msg.msg.event)" msg
+
+            if msg.source==:controller
+                if msg.msg.event==:procs_acquired
+                    state == :procs_requested || error("Invalid state transition from $state")
+                    our_procs = msg.msg.procs
+
+                    # Now distribute test items over test processes
                     for (k,v) in pairs(our_procs)
-                        ix = findfirst(i->i.id == msg.msg.test_process_id, v)
-                        if ix!==nothing
-                            test_process = v[ix]
-                            test_processes_in_same_env = v
-                            test_env = k
-                            break
+                        for proc in v
+                            stolen_testitem_ids_by_proc_id[proc.id] = String[]
+                            testitem_ids_by_proc[proc.id] = pop!(testitem_ids_by_env_chunked[k])
                         end
                     end
 
-                    if test_process === nothing
-                        error("This should never happen")
+                    state = :all_procs_acquired
+
+                    for i in processes_that_are_ready
+                        put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
+                    end
+                elseif msg.msg.event==:cancel_test_run
+                    for i in Iterators.flatten(values(our_procs))
+                        put!(i.msg_channel, (; event=:cancel_test_run))
                     end
 
-                    test_process_to_steal_from = nothing
-                    # Now we look through all test processes with the same env that have more than 1 pending test item to run
-                    for candidate_test_process in test_processes_in_same_env
-                        n_test_items_still_pending = length(testitem_ids_by_proc[candidate_test_process.id])
-                        # We only steal from this one if there are more than 1 test item pending
-                        # AND if we haven't identified another process yet that has more pending test items
-                        if n_test_items_still_pending > 1 && (test_process_to_steal_from===nothing || length(testitem_ids_by_proc[test_process_to_steal_from.id]) < n_test_items_still_pending)
-                            test_process_to_steal_from = candidate_test_process
-                        end
-                    end
+                    # TODO What then?
+                else
+                    error("Unknown message")
+                end
+            elseif msg.source==:testprocess
+                if msg.msg.event == :ready_to_run_testitems
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                    if test_process_to_steal_from === nothing
-                        @info "Nothing to steal for $(test_process.id), returning to pool ($(msg.msg.event): $(msg.msg.testitemid))."
-                        put!(controller.msg_channel, (event=:return_to_pool, testprocess=test_process))
+                    if state == :all_procs_acquired
+                        put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
                     else
-
-                        # we just steal half the items at the end of the queue
-
-                        # TODO HERE
-                        testitem_ids_from_which_we_steal = testitem_ids_by_proc[test_process_to_steal_from.id]
-                        steal_range = (div(length(testitem_ids_from_which_we_steal), 2, RoundUp) + 1):lastindex(testitem_ids_from_which_we_steal)
-
-                        testitem_ids_to_steal = testitem_ids_from_which_we_steal[steal_range]
-
-                        @info "Stealing $(length(testitem_ids_to_steal)) test items from $(test_process_to_steal_from.id) for $(test_process.id)."
-
-                        deleteat!(testitem_ids_from_which_we_steal, steal_range)
-
-                        for i in testitem_ids_to_steal
-                            push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
-                        end
-
-                        append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
-
-                        put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
-
-                        put!(test_process.msg_channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_to_steal)))
-                        # run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing, controller)
+                        push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
                     end
-                end
+                elseif msg.msg.event == :attach_debugger
+                    attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
+                elseif msg.msg.event == :precompile_done
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                # Are we done with the testrun?
-                # @info "Still $(length(valid_test_items)) test items and $(sum(length.(values(stolen_testitem_ids_by_proc_id)))) stolen items processing."
-                if length(valid_test_items)==0 && sum(length.(values(stolen_testitem_ids_by_proc_id)))==0
-
-                    if haskey(controller.coverage, testrun_id)
-                        coverage_results = map(CoverageTools.merge_coverage_counts(controller.coverage[testrun_id])) do i
-                            TestItemControllerProtocol.FileCoverage(
-                                uri = filepath2uri(i.filename),
-                                coverage = i.coverage
-                            )
+                    for i in our_procs[msg.msg.env]
+                        if i.id !== msg.msg.testprocess_id
+                            put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
                         end
                     end
+                elseif msg.msg.event == :started
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                    break
+                    testitem_started_callback(
+                        testrun_id,
+                        msg.msg.testitemid
+                    )
+                elseif msg.msg.event == :append_output
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                end
-            elseif msg.msg.event == :test_process_terminated
-                state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+                    append_output_callback(
+                        testrun_id,
+                        msg.msg.testitemid,
+                        msg.msg.output
+                    )
+                elseif msg.msg.event in (:passed, :failed, :errored, :skipped_stolen)
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                for procs in values(controller.testprocesses)
-                    ind = findfirst(i->i.id==msg.msg.id, procs)
-                    if ind!==nothing
-                        deleteat!(procs, ind)
+                    idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
+                    if msg.msg.event == :skipped_stolen
+                        deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], idx)
+                    else
+                        if idx === nothing
+                            delete!(valid_test_items, msg.msg.testitemid)
+                            idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
+                            deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], idx)
+
+                            if msg.msg.event == :passed
+                                testitem_passed_callback(
+                                    testrun_id,
+                                    msg.msg.testitemid,
+                                    msg.msg.duration
+                                )
+
+                                if msg.msg.coverage !== missing
+                                    file_coverage = get!(controller.coverage, testrun_id) do
+                                        CoverageTools.FileCoverage[]
+                                    end
+                                    append!(file_coverage, map(i->CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.msg.coverage))
+                                end
+                            elseif msg.msg.event == :failed
+                                testitem_failed_callback(
+                                    testrun_id,
+                                    msg.msg.testitemid,
+                                    TestItemControllerProtocol.TestMessage[
+                                        TestItemControllerProtocol.TestMessage(
+                                            message = i.message,
+                                            expectedOutput = i.expectedOutput,
+                                            actualOutput = i.actualOutput,
+                                            uri = i.location.uri,
+                                            line = i.location.position.line,
+                                            column = i.location.position.character
+                                        ) for i in msg.msg.messages
+                                    ],
+                                    missing
+                                )
+                            elseif msg.msg.event == :errored
+                                testitem_errored_callback(
+                                    testrun_id,
+                                    msg.msg.testitemid,
+                                    TestItemControllerProtocol.TestMessage[
+                                        TestItemControllerProtocol.TestMessage(
+                                            message = i.message,
+                                            expectedOutput = missing,
+                                            actualOutput = missing,
+                                            uri = i.location.uri,
+                                            line = i.location.position.line,
+                                            column = i.location.position.character
+                                        ) for i in msg.msg.messages
+                                    ],
+                                    missing
+                                )
+                            end
+                        end
                     end
-                end
 
-                # Inform the user via callback
-                testprocess_terminated(msg.msg.id)
+                    # Stealing logic
+                    if length(testitem_ids_by_proc[msg.msg.test_process_id]) == 0 && length(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id]) == 0
+                        # First we find the test process instance and test env
+                        test_process = nothing
+                        test_processes_in_same_env = nothing
+                        test_env = nothing
+                        for (k,v) in pairs(our_procs)
+                            ix = findfirst(i->i.id == msg.msg.test_process_id, v)
+                            if ix!==nothing
+                                test_process = v[ix]
+                                test_processes_in_same_env = v
+                                test_env = k
+                                break
+                            end
+                        end
+
+                        if test_process === nothing
+                            error("This should never happen")
+                        end
+
+                        test_process_to_steal_from = nothing
+                        # Now we look through all test processes with the same env that have more than 1 pending test item to run
+                        for candidate_test_process in test_processes_in_same_env
+                            n_test_items_still_pending = length(testitem_ids_by_proc[candidate_test_process.id])
+                            # We only steal from this one if there are more than 1 test item pending
+                            # AND if we haven't identified another process yet that has more pending test items
+                            if n_test_items_still_pending > 1 && (test_process_to_steal_from===nothing || length(testitem_ids_by_proc[test_process_to_steal_from.id]) < n_test_items_still_pending)
+                                test_process_to_steal_from = candidate_test_process
+                            end
+                        end
+
+                        if test_process_to_steal_from === nothing
+                            @info "Nothing to steal for $(test_process.id), returning to pool ($(msg.msg.event): $(msg.msg.testitemid))."
+                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=test_process))
+                        else
+
+                            # we just steal half the items at the end of the queue
+
+                            # TODO HERE
+                            testitem_ids_from_which_we_steal = testitem_ids_by_proc[test_process_to_steal_from.id]
+                            steal_range = (div(length(testitem_ids_from_which_we_steal), 2, RoundUp) + 1):lastindex(testitem_ids_from_which_we_steal)
+
+                            testitem_ids_to_steal = testitem_ids_from_which_we_steal[steal_range]
+
+                            @info "Stealing $(length(testitem_ids_to_steal)) test items from $(test_process_to_steal_from.id) for $(test_process.id)."
+
+                            deleteat!(testitem_ids_from_which_we_steal, steal_range)
+
+                            for i in testitem_ids_to_steal
+                                push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
+                            end
+
+                            append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
+
+                            put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
+
+                            put!(test_process.msg_channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_to_steal)))
+                            # run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing, controller)
+                        end
+                    end
+
+                    # Are we done with the testrun?
+                    # @info "Still $(length(valid_test_items)) test items and $(sum(length.(values(stolen_testitem_ids_by_proc_id)))) stolen items processing."
+                    if length(valid_test_items)==0 && sum(length.(values(stolen_testitem_ids_by_proc_id)))==0
+
+                        if haskey(controller.coverage, testrun_id)
+                            coverage_results = map(CoverageTools.merge_coverage_counts(controller.coverage[testrun_id])) do i
+                                TestItemControllerProtocol.FileCoverage(
+                                    uri = filepath2uri(i.filename),
+                                    coverage = i.coverage
+                                )
+                            end
+                        end
+
+                        break
+
+                    end
+                elseif msg.msg.event == :test_process_terminated
+                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
+                    for procs in values(controller.testprocesses)
+                        ind = findfirst(i->i.id==msg.msg.id, procs)
+                        if ind!==nothing
+                            deleteat!(procs, ind)
+                        end
+                    end
+
+                    # Inform the user via callback
+                    testprocess_terminated(msg.msg.id)
+                else
+                    error("Unknown message")
+                end
             else
-                error("Unknown message")
+                error("Unknown source")
             end
-        else
-            error("Unknown source")
         end
-    end
 
-    delete!(controller.testrun_msg_channels, testrun_id)
+        delete!(controller.testrun_msg_channels, testrun_id)
 
-    return coverage_results
+        return coverage_results
+        end
 end
