@@ -74,7 +74,6 @@ function create_testprocess(
         julia_proc_cs = nothing
 
         queued_tests_n = 0
-        queued_test_cancels_n = 0
         finished_testitems = Set{String}()
         testitems_to_run_when_ready = nothing
 
@@ -82,7 +81,7 @@ function create_testprocess(
 
         while true
             msg = take!(msg_channel)
-            @debug "Msg $(msg.event)" msg queued_tests_n queued_test_cancels_n length(finished_testitems)
+            @debug "Msg $(msg.event)" msg queued_tests_n length(finished_testitems)
 
             if msg.event == :shutdown
                 CancellationTokens.cancel(cs)
@@ -150,6 +149,7 @@ function create_testprocess(
                     end
                 catch err
                     Base.display_error(err, catch_backtrace())
+                    try put!(msg_channel, (;event=:restart)) catch end
                 end
             elseif msg.event == :restart
                 state == :testrun_revising || error("Invalid state transition")
@@ -175,10 +175,11 @@ function create_testprocess(
                     start(testprocess_id, controller_msg_channel, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(julia_proc_cs))
                 catch err
                     Base.display_error(err, catch_backtrace())
+                    try put!(msg_channel, (;event=:process_error)) catch end
                 end
             elseif msg.event == :end_testrun
                 if state == :running_tests
-                    @error "This should not happen" queued_tests_n queued_test_cancels_n length(finished_testitems)
+                    @error "This should not happen" queued_tests_n length(finished_testitems)
                 end
                 state == :testrun_idle || error("Invalid state transition from $state")
                 state = :idle
@@ -210,6 +211,7 @@ function create_testprocess(
                         put!(msg_channel, (;event=:testprocess_activated))
                     catch err
                         Base.display_error(err, catch_backtrace())
+                        try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 else
                     state = :testrun_waiting_for_precompile_done
@@ -234,11 +236,12 @@ function create_testprocess(
                             put!(msg_channel, (;event=:testprocess_activated))
                         catch err
                             Base.display_error(err, catch_backtrace())
+                            try put!(msg_channel, (;event=:kill_and_restart)) catch end
                         end
                     end
                 end
             elseif msg.event == :testprocess_activated
-                state in (:activating_env, :testrun_precompiling, :testrun_revising) || error("Invalid state transition from $state.")
+                state in (:activating_env, :testrun_activating, :testrun_precompiling, :testrun_revising) || error("Invalid state transition from $state.")
                 state = :configuring_test_run
 
                 if env.mode == "Debug"
@@ -259,6 +262,7 @@ function create_testprocess(
                     put!(msg_channel, (;event=:testprocess_testsetups_loaded))
                 catch err
                     Base.display_error(err, catch_backtrace())
+                    try put!(msg_channel, (;event=:kill_and_restart)) catch end
                 end
             elseif msg.event == :testprocess_testsetups_loaded
                 state == :configuring_test_run || error("Invalid state transition from $state.")
@@ -306,9 +310,10 @@ function create_testprocess(
                                 ],
                             )
                         )
-                        testitems_to_run_when_ready! = nothing
+                        testitems_to_run_when_ready = nothing
                     catch err
                         Base.display_error(err, catch_backtrace())
+                        try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 end
             elseif msg.event == :run_testitems
@@ -345,6 +350,7 @@ function create_testprocess(
                         )
                     catch err
                         Base.display_error(err, catch_backtrace())
+                        try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 elseif state == :testprocess_starting
                     testitems_to_run_when_ready = msg.testitems
@@ -352,7 +358,6 @@ function create_testprocess(
                     error("Invalid state transition from $state on $testprocess_id.")
                 end
             elseif msg.event == :steal
-                queued_test_cancels_n += length(msg.testitem_ids)
                 @async try
                     JSONRPC.send(
                             endpoint,
@@ -378,75 +383,72 @@ function create_testprocess(
             elseif msg.event in (:testitem_passed, :testitem_failed, :testitem_errored, :testitem_skipped_stolen)
                 state == :running_tests || error("Invalid state transition from $state, id is $testprocess_id, testitem_id $(msg.testitem_id) has $(msg.event)")
 
-                if msg.event == :testitem_skipped_stolen
-                    push!(finished_testitems, msg.testitem_id)
-                    queued_test_cancels_n -= 1
-                elseif !(msg.testitem_id in finished_testitems)
-                    push!(finished_testitems, msg.testitem_id)
+                if msg.testitem_id in finished_testitems
+                    # Duplicate result from steal race — skip forwarding
                 else
-                    error("asdf")
-                end
+                    push!(finished_testitems, msg.testitem_id)
 
-                if queued_tests_n == length(finished_testitems) && queued_test_cancels_n == 0
-                    state = :testrun_idle
-                end
+                    if queued_tests_n == length(finished_testitems)
+                        state = :testrun_idle
+                    end
 
-                if msg.event == :testitem_passed
-                    put!(
-                        testrun_channel,
-                        (
-                            source=:testprocess,
-                            msg=(
-                                event=:passed,
-                                testitemid=msg.testitem_id,
-                                duration=msg.duration,
-                                coverage=msg.coverage,
-                                test_process_id = testprocess_id
+                    if msg.event == :testitem_passed
+                        put!(
+                            testrun_channel,
+                            (
+                                source=:testprocess,
+                                msg=(
+                                    event=:passed,
+                                    testitemid=msg.testitem_id,
+                                    duration=msg.duration,
+                                    coverage=msg.coverage,
+                                    test_process_id = testprocess_id
+                                )
                             )
                         )
-                    )
-                elseif msg.event == :testitem_failed
-                    put!(
-                        testrun_channel,
-                        (
-                            source=:testprocess,
-                            msg=(
-                                event=:failed,
-                                testitemid=msg.testitem_id,
-                                messages=msg.messages,
-                                duration=msg.duration,
-                                test_process_id = testprocess_id
+                    elseif msg.event == :testitem_failed
+                        put!(
+                            testrun_channel,
+                            (
+                                source=:testprocess,
+                                msg=(
+                                    event=:failed,
+                                    testitemid=msg.testitem_id,
+                                    messages=msg.messages,
+                                    duration=msg.duration,
+                                    test_process_id = testprocess_id
+                                )
                             )
                         )
-                    )
-                elseif msg.event == :testitem_errored
-                    put!(
-                        testrun_channel,
-                        (
-                            source=:testprocess,
-                            msg=(
-                                event=:errored,
-                                testitemid=msg.testitem_id,
-                                messages=msg.messages,
-                                duration=msg.duration,
-                                test_process_id = testprocess_id
+                    elseif msg.event == :testitem_errored
+                        put!(
+                            testrun_channel,
+                            (
+                                source=:testprocess,
+                                msg=(
+                                    event=:errored,
+                                    testitemid=msg.testitem_id,
+                                    messages=msg.messages,
+                                    duration=msg.duration,
+                                    test_process_id = testprocess_id
+                                )
                             )
                         )
-                    )
-                elseif msg.event == :testitem_skipped_stolen
-                    put!(
-                        testrun_channel,
-                        (
-                            source=:testprocess,
-                            msg=(
-                                event=:skipped_stolen,
-                                testitemid=msg.testitem_id,
-                                test_process_id = testprocess_id
+                    elseif msg.event == :testitem_skipped_stolen
+                        put!(
+                            testrun_channel,
+                            (
+                                source=:testprocess,
+                                msg=(
+                                    event=:skipped_stolen,
+                                    testitemid=msg.testitem_id,
+                                    test_process_id = testprocess_id
+                                )
                             )
                         )
-                    )
-                else
-                    error("Unknown message")
+                    else
+                        error("Unknown message")
+                    end
                 end
             elseif msg.event == :append_output
                 # TODO Remove this and understand the race situation better
@@ -464,6 +466,28 @@ function create_testprocess(
                         )
                     )
                 end
+            elseif msg.event == :kill_and_restart
+                @warn "Async operation failed, restarting test process" testprocess_id state
+                if jl_process !== nothing
+                    try CancellationTokens.cancel(julia_proc_cs) catch end
+                    try kill(jl_process) catch end
+                    jl_process = nothing
+                    endpoint = nothing
+                    julia_proc_cs = nothing
+                end
+                state = :testrun_killed_after_revise_fail
+                put!(msg_channel, (;event=:start))
+            elseif msg.event == :process_error
+                @error "Test process encountered an unrecoverable error" testprocess_id state
+                if jl_process !== nothing
+                    try CancellationTokens.cancel(julia_proc_cs) catch end
+                    try kill(jl_process) catch end
+                    jl_process = nothing
+                    endpoint = nothing
+                    julia_proc_cs = nothing
+                end
+                put!(controller_msg_channel, (event=:test_process_terminated, id=testprocess_id))
+                break
             end
         end
     catch err
