@@ -434,18 +434,23 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :testitem_started
-                put!(
-                    testrun_channel,
-                    (
-                        source=:testprocess,
-                        msg=(
-                            event=:started,
-                            testitemid=msg.testitem_id
+                if testrun_channel !== nothing
+                    put!(
+                        testrun_channel,
+                        (
+                            source=:testprocess,
+                            msg=(
+                                event=:started,
+                                testitemid=msg.testitem_id
+                            )
                         )
                     )
-                )
+                end
             elseif msg.event in (:testitem_passed, :testitem_failed, :testitem_errored, :testitem_skipped_stolen)
-                state == :running_tests || error("Invalid state transition from $state, id is $testprocess_id, testitem_id $(msg.testitem_id) has $(msg.event)")
+                if state != :running_tests
+                    # Stale result from a killed process after cancellation — ignore
+                    continue
+                end
 
                 if msg.testitem_id in finished_testitems
                     # Duplicate result from steal race — skip forwarding
