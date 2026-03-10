@@ -191,7 +191,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
         ),
         id -> JSONRPC.send(
             jr_controller.endpoint,
-            notificationTypeTestProcessTerminated,
+            TestItemControllerProtocol.notificationTypeTestProcessTerminated,
             (;id = id)
         ),
         (id, status) -> JSONRPC.send(
