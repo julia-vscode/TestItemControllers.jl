@@ -105,6 +105,9 @@ function create_testprocess(
                     endpoint = nothing
                     julia_proc_cs = nothing
                 end
+                if testrun_channel !== nothing && isopen(testrun_channel)
+                    put!(testrun_channel, (source=:testprocess, msg=(event=:test_process_terminated, id=testprocess_id)))
+                end
                 put!(controller_msg_channel, (event=:test_process_terminated, id=testprocess_id))
                 break
             elseif msg.event == :start_testrun
@@ -603,6 +606,9 @@ function create_testprocess(
                     jl_process = nothing
                     endpoint = nothing
                     julia_proc_cs = nothing
+                end
+                if testrun_channel !== nothing && isopen(testrun_channel)
+                    put!(testrun_channel, (source=:testprocess, msg=(event=:test_process_terminated, id=testprocess_id)))
                 end
                 put!(controller_msg_channel, (event=:test_process_terminated, id=testprocess_id))
                 break
