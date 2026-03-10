@@ -245,7 +245,7 @@ function create_testprocess(
                 state = :testprocess_starting
 
                 julia_proc_cs === nothing || error("Invalid state for julia_proc_cs")
-                julia_proc_cs = if testrun_token !== nothing
+                julia_proc_cs = if testrun_token !== nothing && !CancellationTokens.is_cancellation_requested(testrun_token)
                     CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs), testrun_token)
                 else
                     CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
@@ -569,6 +569,10 @@ function create_testprocess(
                     )
                 end
             elseif msg.event == :kill_and_restart
+                if state == :idle
+                    # Stale message from a previous async operation — ignore
+                    continue
+                end
                 @warn "Async operation failed, restarting test process" testprocess_id state
                 if jl_process !== nothing
                     try CancellationTokens.cancel(julia_proc_cs) catch end
