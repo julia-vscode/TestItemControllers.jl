@@ -77,6 +77,7 @@ function create_testprocess(
         queued_tests_n = 0
         finished_testitems = Set{String}()
         testitems_to_run_when_ready = nothing
+        testrun_watcher_task = nothing
 
         state = :created
 
@@ -115,10 +116,11 @@ function create_testprocess(
                 test_setups = msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
 
-                @async try
+                testrun_watcher_task = @async try
                     wait(testrun_token)
                     try put!(msg_channel, (;event=:cancel_test_run)) catch end
                 catch err
+                    err isa Base.InvalidStateException && return  # interrupted during cleanup
                     @error "Error in testrun cancellation watcher" testprocess_id exception=(err, catch_backtrace())
                 end
             elseif msg.event == :cancel_test_run
@@ -271,6 +273,10 @@ function create_testprocess(
                     # Process is restarting (e.g. after cancellation) — clear testrun
                     # vars but keep state so :testprocess_launched can finish and
                     # transition to :idle via the testrun_channel===nothing path.
+                    if testrun_watcher_task !== nothing
+                        try schedule(testrun_watcher_task, InterruptException(); error=true) catch end
+                        testrun_watcher_task = nothing
+                    end
                     testrun_channel = nothing
                     testrun_token = nothing
                     test_setups = nothing
@@ -279,6 +285,12 @@ function create_testprocess(
                 end
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition from $state")
                 state = :idle
+
+                # Interrupt the cancellation watcher so it doesn't leak
+                if testrun_watcher_task !== nothing
+                    try schedule(testrun_watcher_task, InterruptException(); error=true) catch end
+                    testrun_watcher_task = nothing
+                end
 
                 testrun_channel = nothing
                 testrun_token = nothing
