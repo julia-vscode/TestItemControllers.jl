@@ -142,6 +142,7 @@ function Base.run(
                         )
                     )
 
+                    p.idle = false
                     push!(our_procs[k], p)
 
                     put!(p.msg_channel, (event=:revise, test_env_content_hash=msg.env_content_hash_by_env[k]))
