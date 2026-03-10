@@ -313,6 +313,7 @@ function execute_testrun(
     testitem_passed_callback,
     testitem_failed_callback,
     testitem_errored_callback,
+    testitem_skipped_callback,
     append_output_callback,
     attach_debugger_callback,
     token)
@@ -652,8 +653,48 @@ function execute_testrun(
                 elseif msg.msg.event == :test_process_terminated
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
+                    # Resolve all remaining test items assigned to this process as skipped
+                    terminated_proc_id = msg.msg.id
+                    if haskey(testitem_ids_by_proc, terminated_proc_id)
+                        for testitem_id in testitem_ids_by_proc[terminated_proc_id]
+                            if haskey(valid_test_items, testitem_id)
+                                delete!(valid_test_items, testitem_id)
+                                testitem_skipped_callback(testrun_id, testitem_id)
+                            end
+                        end
+                        empty!(testitem_ids_by_proc[terminated_proc_id])
+                    end
+                    if haskey(stolen_testitem_ids_by_proc_id, terminated_proc_id)
+                        empty!(stolen_testitem_ids_by_proc_id[terminated_proc_id])
+                    end
+
+                    # Remove process from our_procs
+                    if our_procs !== nothing
+                        for (env, procs) in pairs(our_procs)
+                            idx = findfirst(p -> p.id == terminated_proc_id, procs)
+                            if idx !== nothing
+                                deleteat!(procs, idx)
+                                break
+                            end
+                        end
+                    end
+
                     # Forward to controller — it owns controller.testprocesses
-                    put!(controller.msg_channel, (event=:test_process_terminated, id=msg.msg.id))
+                    put!(controller.msg_channel, (event=:test_process_terminated, id=terminated_proc_id))
+
+                    # Check if the test run is now complete
+                    if length(valid_test_items) == 0 && sum(length.(values(stolen_testitem_ids_by_proc_id))) == 0
+                        if !isempty(local_coverage)
+                            coverage_results = map(CoverageTools.merge_coverage_counts(local_coverage)) do i
+                                TestItemControllerProtocol.FileCoverage(
+                                    uri = filepath2uri(i.filename),
+                                    coverage = i.coverage
+                                )
+                            end
+                        end
+
+                        break
+                    end
                 else
                     error("Unknown message")
                 end
@@ -663,23 +704,9 @@ function execute_testrun(
 
                     CancellationTokens.cancel(testrun_cs)
 
-                    # Report all remaining test items as errored
+                    # Report all remaining test items as skipped
                     for (id, item) in valid_test_items
-                        testitem_errored_callback(
-                            testrun_id,
-                            id,
-                            TestItemControllerProtocol.TestMessage[
-                                TestItemControllerProtocol.TestMessage(
-                                    message = "Test run was cancelled.",
-                                    expectedOutput = missing,
-                                    actualOutput = missing,
-                                    uri = item.uri,
-                                    line = item.line,
-                                    column = item.column
-                                )
-                            ],
-                            missing
-                        )
+                        testitem_skipped_callback(testrun_id, id)
                     end
 
                     # Return all processes to the pool

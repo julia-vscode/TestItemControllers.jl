@@ -96,7 +96,16 @@ function create_testprocess(
                     Base.display_error(err, catch_backtrace())
                 end
             elseif msg.event == :terminate
-                error("NOT YET IMPLEMENTED")
+                @info "Terminating test process $testprocess_id (state: $state)"
+                if jl_process !== nothing
+                    try CancellationTokens.cancel(julia_proc_cs) catch end
+                    try kill(jl_process) catch end
+                    jl_process = nothing
+                    endpoint = nothing
+                    julia_proc_cs = nothing
+                end
+                put!(controller_msg_channel, (event=:test_process_terminated, id=testprocess_id))
+                break
             elseif msg.event == :start_testrun
                 state in (:created, :idle) || error("Invalid state transition from $state.")
                 state = :testrun_idle

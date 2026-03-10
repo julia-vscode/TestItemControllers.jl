@@ -108,6 +108,12 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                     duration=duration
             )
         ),
+        # testitem_skipped_callback
+        (testrun_id, testitem_id) -> JSONRPC.send(
+            jr_controller.endpoint,
+            TestItemControllerProtocol.notficiationTypeTestItemSkipped,
+            (testRunId=testrun_id, testItemId=testitem_id)
+        ),
         # append_output_callback
         (testrun_id, testitem_id, output) -> JSONRPC.send(
             jr_controller.endpoint,
