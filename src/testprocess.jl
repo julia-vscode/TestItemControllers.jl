@@ -260,6 +260,10 @@ function create_testprocess(
                     try put!(msg_channel, (;event=:process_error)) catch end
                 end
             elseif msg.event == :end_testrun
+                if state == :idle
+                    # Already idle, nothing to do (defensive guard against duplicate :end_testrun)
+                    continue
+                end
                 if state == :running_tests
                     @error "This should not happen" queued_tests_n length(finished_testitems)
                 end

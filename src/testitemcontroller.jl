@@ -104,6 +104,11 @@ function Base.run(
                 testprocess_terminated(msg.id)
             end
         elseif msg.event == :return_to_pool
+            if msg.testprocess.idle
+                # Already returned to pool (e.g. via "nothing to steal" path),
+                # skip duplicate :end_testrun to avoid invalid state transition.
+                continue
+            end
             put!(msg.testprocess.msg_channel, (;event=:end_testrun))
             msg.testprocess.idle = true
             if testprocess_statuschanged!==nothing
