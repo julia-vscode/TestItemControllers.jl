@@ -20,8 +20,8 @@ get_param_type(::NotificationType{TPARAM}) where {TPARAM} = TPARAM
 get_param_type(::RequestType{TPARAM,TR}) where {TPARAM,TR} = TPARAM
 get_return_type(::RequestType{TPARAM,TR}) where {TPARAM,TR} = TR
 
-function send(x::JSONRPCEndpoint, request::RequestType{TPARAM,TR}, params::TPARAM) where {TPARAM,TR}
-    res = send_request(x, request.method, params)
+function send(x::JSONRPCEndpoint, request::RequestType{TPARAM,TR}, params::TPARAM; server_token::Union{Nothing,CancellationTokens.CancellationToken}=nothing, client_token::Union{Nothing,CancellationTokens.CancellationToken}=nothing) where {TPARAM,TR}
+    res = send_request(x, request.method, params; server_token=server_token, client_token=client_token)
     return typed_res(res, TR)::TR
 end
 
@@ -51,23 +51,40 @@ mutable struct MsgDispatcher
     end
 end
 
-function Base.setindex!(dispatcher::MsgDispatcher, func::Function, message_type::AbstractMessageType)
+function Base.setindex!(dispatcher::MsgDispatcher, @nospecialize(func::Function), @nospecialize(message_type::AbstractMessageType))
     dispatcher._handlers[message_type.method] = Handler(message_type, func)
 end
 
 function dispatch_msg(x::JSONRPCEndpoint, dispatcher::MsgDispatcher, msg::Request)
     dispatcher._currentlyHandlingMsg = true
+    is_request = msg.id !== nothing
     try
         method_name = msg.method
         handler = get(dispatcher._handlers, method_name, nothing)
         if handler !== nothing
             param_type = get_param_type(handler.message_type)
-            params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+            local params
+            try
+                params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+            catch err
+                if is_request
+                    send_error_response(x, msg, INVALID_PARAMS, string("Invalid params: ", err), nothing)
+                end
+                rethrow()
+            end
 
-            if handler.message_type isa RequestType
-                res = handler.func(x, params, msg.token)
-            else
-                res = handler.func(x, params)
+            local res
+            try
+                if handler.message_type isa RequestType
+                    res = handler.func(x, params, msg.token)
+                else
+                    res = handler.func(x, params)
+                end
+            catch err
+                if is_request
+                    send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
+                end
+                rethrow()
             end
 
             if handler.message_type isa RequestType
@@ -77,11 +94,14 @@ function dispatch_msg(x::JSONRPCEndpoint, dispatcher::MsgDispatcher, msg::Reques
                     send_success_response(x, msg, res)
                 else
                     error_msg = "The handler for the '$method_name' request returned a value of type $(typeof(res)), which is not a valid return type according to the request definition."
-                    send_error_response(x, msg, -32603, error_msg, nothing)                    
+                    send_error_response(x, msg, -32603, error_msg, nothing)
                     error(error_msg)
                 end
             end
         else
+            if is_request
+                send_error_response(x, msg, METHOD_NOT_FOUND, "Unknown method $method_name.", nothing)
+            end
             error("Unknown method $method_name.")
         end
     finally
@@ -95,26 +115,43 @@ macro message_dispatcher(name, body)
     quote
         function $(esc(name))(x, msg::Request, context=nothing)
             method_name = msg.method
+            is_request = msg.id !== nothing
 
             $(
                 (
                     :(
                         if method_name == $(esc(i.args[2])).method
                             param_type = get_param_type($(esc(i.args[2])))
-                            params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+                            local params
+                            try
+                                params = param_type === Nothing ? nothing : param_type <: NamedTuple ? convert(param_type,(;(Symbol(i[1])=>i[2] for i in msg.params)...)) : param_type(msg.params)
+                            catch err
+                                if is_request
+                                    send_error_response(x, msg, INVALID_PARAMS, string("Invalid params: ", err), nothing)
+                                end
+                                rethrow()
+                            end
 
-                            if context===nothing
-                                if $(esc(i.args[2])) isa RequestType
-                                    res = $(esc(i.args[3]))(params, msg.token)
+                            local res
+                            try
+                                if context===nothing
+                                    if $(esc(i.args[2])) isa RequestType
+                                        res = $(esc(i.args[3]))(params, msg.token)
+                                    else
+                                        res = $(esc(i.args[3]))(params)
+                                    end
                                 else
-                                    res = $(esc(i.args[3]))(params)
+                                    if $(esc(i.args[2])) isa RequestType
+                                        res = $(esc(i.args[3]))(params, context, msg.token)
+                                    else
+                                        res = $(esc(i.args[3]))(params, context)
+                                    end
                                 end
-                            else
-                                if $(esc(i.args[2])) isa RequestType
-                                    res = $(esc(i.args[3]))(params, context, msg.token)
-                                else
-                                    res = $(esc(i.args[3]))(params, context)
+                            catch err
+                                if is_request
+                                    send_error_response(x, msg, INTERNAL_ERROR, string("Error handling request: ", err), nothing)
                                 end
+                                rethrow()
                             end
 
                             if $(esc(i.args[2])) isa RequestType
@@ -124,7 +161,7 @@ macro message_dispatcher(name, body)
                                     send_success_response(x, msg, res)
                                 else
                                     error_msg = "The handler for the '$method_name' request returned a value of type $(typeof(res)), which is not a valid return type according to the request definition."
-                                    send_error_response(x, msg, -32603, error_msg, nothing)                    
+                                    send_error_response(x, msg, -32603, error_msg, nothing)
                                     error(error_msg)
                                 end
                             end
@@ -135,6 +172,9 @@ macro message_dispatcher(name, body)
                 )...
             )
 
+            if is_request
+                send_error_response(x, msg, METHOD_NOT_FOUND, "Unknown method $method_name.", nothing)
+            end
             error("Unknown method $method_name.")
         end
     end
