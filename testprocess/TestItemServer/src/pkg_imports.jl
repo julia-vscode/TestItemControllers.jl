@@ -25,6 +25,7 @@ module JSONRPC
 import ..CancellationTokens
 import ..JSON
 import UUIDs
+import Sockets
 include("../../../packages/JSONRPC/src/packagedef.jl")
 end
 
