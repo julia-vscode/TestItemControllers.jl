@@ -218,6 +218,10 @@ function create_testprocess(
                 julia_proc_cs = nothing
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :start
+                if state == :idle
+                    # Stale :start from a cancelled test run that already ended — ignore
+                    continue
+                end
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition")
                 state = :testprocess_starting
 
@@ -240,7 +244,7 @@ function create_testprocess(
                 if state == :running_tests
                     @error "This should not happen" queued_tests_n length(finished_testitems)
                 end
-                state == :testrun_idle || error("Invalid state transition from $state")
+                state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition from $state")
                 state = :idle
 
                 testrun_channel = nothing
