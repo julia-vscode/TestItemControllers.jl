@@ -162,7 +162,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
                 if jr_controller.err_handler !== nothing
                     jr_controller.err_handler(err, bt)
                 else
-                    Base.display_error(err, bt)
+                    @error "Error dispatching message" exception=(err, bt)
                 end
             end
         end
@@ -171,7 +171,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
         if jr_controller.err_handler !== nothing
             jr_controller.err_handler(err, bt)
         else
-            Base.display_error(err, bt)
+            @error "Error in JSONRPC message loop" exception=(err, bt)
         end
     end
 

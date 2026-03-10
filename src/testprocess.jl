@@ -93,7 +93,7 @@ function create_testprocess(
                         nothing
                     )
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    @error "Error sending shutdown request" testprocess_id state exception=(err, catch_backtrace())
                 end
             elseif msg.event == :terminate
                 @info "Terminating test process $testprocess_id (state: $state)"
@@ -115,9 +115,11 @@ function create_testprocess(
                 test_setups = msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
 
-                @async begin
+                @async try
                     wait(testrun_token)
                     try put!(msg_channel, (;event=:cancel_test_run)) catch end
+                catch err
+                    @error "Error in testrun cancellation watcher" testprocess_id exception=(err, catch_backtrace())
                 end
             elseif msg.event == :cancel_test_run
                 if state == :idle
@@ -134,7 +136,7 @@ function create_testprocess(
                     @async try
                         shutdown_timeout = CancellationTokens.CancellationTokenSource(2.0)
                         shutdown_done = Channel{Bool}(1)
-                        @async begin
+                        @async try
                             try
                                 JSONRPC.send(
                                     saved_endpoint,
@@ -145,10 +147,14 @@ function create_testprocess(
                             catch
                                 put!(shutdown_done, false)
                             end
+                        catch err
+                            @error "Error in shutdown sender" testprocess_id exception=(err, catch_backtrace())
                         end
-                        @async begin
+                        @async try
                             wait(CancellationTokens.get_token(shutdown_timeout))
                             try put!(shutdown_done, false) catch end
+                        catch err
+                            @error "Error in shutdown timeout watcher" testprocess_id exception=(err, catch_backtrace())
                         end
                         graceful = take!(shutdown_done)
                         if !graceful && process_running(saved_process)
@@ -212,7 +218,7 @@ function create_testprocess(
                         put!(msg_channel, (;event=:restart))
                     end
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    @error "Error during revise" testprocess_id state exception=(err, catch_backtrace())
                     try put!(msg_channel, (;event=:restart)) catch end
                 end
             elseif msg.event == :restart
@@ -250,7 +256,7 @@ function create_testprocess(
 
                     start(testprocess_id, controller_msg_channel, msg_channel, env, debug_pipe_name, error_handler_file, crash_reporting_pipename, CancellationTokens.get_token(julia_proc_cs))
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    @error "Error starting test process" testprocess_id state exception=(err, catch_backtrace())
                     try put!(msg_channel, (;event=:process_error)) catch end
                 end
             elseif msg.event == :end_testrun
@@ -297,7 +303,7 @@ function create_testprocess(
                         put!(testrun_channel, (source=:testprocess, msg=(;event=:precompile_done, env=env, testprocess_id=testprocess_id)))
                         put!(msg_channel, (;event=:testprocess_activated))
                     catch err
-                        Base.display_error(err, catch_backtrace())
+                        @error "Error activating environment" testprocess_id state exception=(err, catch_backtrace())
                         try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 else
@@ -322,7 +328,7 @@ function create_testprocess(
 
                             put!(msg_channel, (;event=:testprocess_activated))
                         catch err
-                            Base.display_error(err, catch_backtrace())
+                            @error "Error activating env after precompile" testprocess_id state exception=(err, catch_backtrace())
                             try put!(msg_channel, (;event=:kill_and_restart)) catch end
                         end
                     end
@@ -348,7 +354,7 @@ function create_testprocess(
 
                     put!(msg_channel, (;event=:testprocess_testsetups_loaded))
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    @error "Error configuring test run" testprocess_id state exception=(err, catch_backtrace())
                     try put!(msg_channel, (;event=:kill_and_restart)) catch end
                 end
             elseif msg.event == :testprocess_testsetups_loaded
@@ -399,7 +405,7 @@ function create_testprocess(
                         )
                         testitems_to_run_when_ready = nothing
                     catch err
-                        Base.display_error(err, catch_backtrace())
+                        @error "Error running queued test batch" testprocess_id state exception=(err, catch_backtrace())
                         try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 end
@@ -436,7 +442,7 @@ function create_testprocess(
                             )
                         )
                     catch err
-                        Base.display_error(err, catch_backtrace())
+                        @error "Error running testitems" testprocess_id state exception=(err, catch_backtrace())
                         try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 elseif state == :testprocess_starting
@@ -454,7 +460,7 @@ function create_testprocess(
                             )
                         )
                 catch err
-                    Base.display_error(err, catch_backtrace())
+                    @error "Error stealing testitems" testprocess_id state exception=(err, catch_backtrace())
                 end
             elseif msg.event == :testitem_started
                 if testrun_channel !== nothing
@@ -583,7 +589,7 @@ function create_testprocess(
             end
         end
     catch err
-        Base.display_error(err, catch_backtrace())
+        @error "Fatal error in test process event loop" testprocess_id exception=(err, catch_backtrace())
     end
 
     return testprocess_id, msg_channel
@@ -745,12 +751,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
             end
         end
     catch err
-        bt = catch_backtrace()
-        if controller.err_handler !== nothing
-            controller.err_handler(err, bt)
-        else
-            Base.display_error(err, bt)
-        end
+        @error "Error reading test process output" testprocess_id exception=(err, catch_backtrace())
     end
 
     @debug "Waiting for connection from test process"
