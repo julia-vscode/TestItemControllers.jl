@@ -176,6 +176,15 @@ function create_testprocess(
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :revise
                 state == :testrun_idle || error("Invalid state transition")
+
+                if endpoint === nothing
+                    # Process was killed during cancellation but not yet restarted —
+                    # skip revise and go straight to restart path.
+                    state = :testrun_killed_after_revise_fail
+                    put!(msg_channel, (;event = :start))
+                    continue
+                end
+
                 state = :testrun_revising
 
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Revising"))
@@ -211,8 +220,12 @@ function create_testprocess(
                 state = :testrun_killed_after_revise_fail
 
                 @info "Revise could not handle changes or test env was changed, restarting process"
-                CancellationTokens.cancel(julia_proc_cs)
-                kill(jl_process)
+                if julia_proc_cs !== nothing
+                    CancellationTokens.cancel(julia_proc_cs)
+                end
+                if jl_process !== nothing
+                    kill(jl_process)
+                end
                 jl_process = nothing
                 endpoint = nothing
                 julia_proc_cs = nothing
@@ -243,6 +256,16 @@ function create_testprocess(
             elseif msg.event == :end_testrun
                 if state == :running_tests
                     @error "This should not happen" queued_tests_n length(finished_testitems)
+                end
+                if state == :testprocess_starting
+                    # Process is restarting (e.g. after cancellation) — clear testrun
+                    # vars but keep state so :testprocess_launched can finish and
+                    # transition to :idle via the testrun_channel===nothing path.
+                    testrun_channel = nothing
+                    testrun_token = nothing
+                    test_setups = nothing
+                    coverage_root_uris = nothing
+                    continue
                 end
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition from $state")
                 state = :idle
