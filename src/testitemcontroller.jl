@@ -11,8 +11,6 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
 
     msg_channel::Channel
 
-    testrun_msg_channels::Dict{String,Channel}
-
     testprocesses::Dict{TestEnvironment,Vector{TestProcess}}
     testprocess_precompile_not_required::Set{
         @NamedTuple{
@@ -25,8 +23,6 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
 
     precompiled_envs::Set{TestEnvironment}
 
-    coverage::Dict{String,Vector{CoverageTools.FileCoverage}}
-
     error_handler_file::Union{Nothing,String}
     crash_reporting_pipename::Union{Nothing,String}
 
@@ -38,11 +34,9 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
         return new{ERR_HANDLER}(
             err_handler,
             Channel(Inf),
-            Dict{String,Channel}(),
             Dict{TestEnvironment,Vector{TestProcess}}(),
             Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
             Set{TestEnvironment}(),
-            Dict{String,Vector{CoverageTools.FileCoverage}}(),
             error_handler_file,
             crash_reporting_pipename
         )
@@ -72,6 +66,8 @@ function Base.run(
         testprocess_statuschanged=nothing,
         testprocess_output=nothing
     )
+    testrun_channels = Dict{String,Channel}()
+
     while true
         msg = take!(controller.msg_channel)
         @debug "Msg $(msg.event)" msg
@@ -108,6 +104,21 @@ function Base.run(
             if testprocess_terminated!==nothing
                 testprocess_terminated(msg.id)
             end
+        elseif msg.event == :cancel_testrun
+            ch = get(testrun_channels, msg.testrun_id, nothing)
+            if ch !== nothing
+                put!(
+                    ch,
+                    (
+                        source=:controller,
+                        msg=(;
+                            event=:cancel_test_run,
+                        )
+                    )
+                )
+            end
+        elseif msg.event == :testrun_complete
+            delete!(testrun_channels, msg.testrun_id)
         elseif msg.event == :return_to_pool
             put!(msg.testprocess.msg_channel, (;event=:end_testrun))
             msg.testprocess.idle = true
@@ -115,6 +126,8 @@ function Base.run(
                 testprocess_statuschanged(msg.testprocess.id, "Idle")
             end
         elseif msg.event == :get_procs_for_testrun
+            testrun_channels[msg.testrun_id] = msg.testrun_msg_queue
+
             our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
 
             for (k,v) in pairs(msg.proc_count_by_env)
@@ -328,7 +341,6 @@ function execute_testrun(
         state = :created
 
         testrun_msg_queue = Channel{Any}(Inf)
-        controller.testrun_msg_channels[testrun_id] = testrun_msg_queue
         our_procs = nothing
 
         valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
@@ -404,6 +416,7 @@ function execute_testrun(
             controller.msg_channel,
             (
                 event = :get_procs_for_testrun,
+                testrun_id = testrun_id,
                 proc_count_by_env = Dict(k=>length(v) for (k,v) in testitem_ids_by_env_chunked),
                 env_content_hash_by_env = env_content_hash_by_env,
                 test_setups = [
@@ -424,6 +437,8 @@ function execute_testrun(
         testitem_ids_by_proc = Dict{String,Vector{String}}()
 
         coverage_results = missing
+
+        local_coverage = CoverageTools.FileCoverage[]
 
         processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
 
@@ -495,14 +510,26 @@ function execute_testrun(
                 elseif msg.msg.event in (:passed, :failed, :errored, :skipped_stolen)
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                    idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
+                    stolen_idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
+
                     if msg.msg.event == :skipped_stolen
-                        deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], idx)
+                        # Victim confirms skip — clean up stolen tracking
+                        if stolen_idx !== nothing
+                            deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
+                        end
                     else
-                        if idx === nothing
+                        if stolen_idx !== nothing
+                            # Victim completed item before steal took effect — clean up stolen tracking
+                            deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
+                        end
+
+                        if haskey(valid_test_items, msg.msg.testitemid)
+                            # First result for this item — process it
                             delete!(valid_test_items, msg.msg.testitemid)
-                            idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
-                            deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], idx)
+                            proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
+                            if proc_idx !== nothing
+                                deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
+                            end
 
                             if msg.msg.event == :passed
                                 testitem_passed_callback(
@@ -512,10 +539,7 @@ function execute_testrun(
                                 )
 
                                 if msg.msg.coverage !== missing
-                                    file_coverage = get!(controller.coverage, testrun_id) do
-                                        CoverageTools.FileCoverage[]
-                                    end
-                                    append!(file_coverage, map(i->CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.msg.coverage))
+                                    append!(local_coverage, map(i->CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.msg.coverage))
                                 end
                             elseif msg.msg.event == :failed
                                 testitem_failed_callback(
@@ -549,6 +573,13 @@ function execute_testrun(
                                     ],
                                     missing
                                 )
+                            end
+                        else
+                            # Duplicate — thief reported result for item victim already handled.
+                            # Clean up the thief's tracking.
+                            proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
+                            if proc_idx !== nothing
+                                deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
                             end
                         end
                     end
@@ -618,8 +649,8 @@ function execute_testrun(
                     # @info "Still $(length(valid_test_items)) test items and $(sum(length.(values(stolen_testitem_ids_by_proc_id)))) stolen items processing."
                     if length(valid_test_items)==0 && sum(length.(values(stolen_testitem_ids_by_proc_id)))==0
 
-                        if haskey(controller.coverage, testrun_id)
-                            coverage_results = map(CoverageTools.merge_coverage_counts(controller.coverage[testrun_id])) do i
+                        if !isempty(local_coverage)
+                            coverage_results = map(CoverageTools.merge_coverage_counts(local_coverage)) do i
                                 TestItemControllerProtocol.FileCoverage(
                                     uri = filepath2uri(i.filename),
                                     coverage = i.coverage
@@ -633,15 +664,8 @@ function execute_testrun(
                 elseif msg.msg.event == :test_process_terminated
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
-                    for procs in values(controller.testprocesses)
-                        ind = findfirst(i->i.id==msg.msg.id, procs)
-                        if ind!==nothing
-                            deleteat!(procs, ind)
-                        end
-                    end
-
-                    # Inform the user via callback
-                    testprocess_terminated(msg.msg.id)
+                    # Forward to controller — it owns controller.testprocesses
+                    put!(controller.msg_channel, (event=:test_process_terminated, id=msg.msg.id))
                 else
                     error("Unknown message")
                 end
@@ -650,7 +674,7 @@ function execute_testrun(
             end
         end
 
-        delete!(controller.testrun_msg_channels, testrun_id)
+        put!(controller.msg_channel, (event=:testrun_complete, testrun_id=testrun_id))
 
         return coverage_results
         end

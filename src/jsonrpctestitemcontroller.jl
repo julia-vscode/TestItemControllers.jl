@@ -134,18 +134,13 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
 end
 
 function cancel_testrun_notification(params::TestItemControllerProtocol.CancelTestRunParams, controller::JSONRPCTestItemController, token)
-    ch = get(controller.testrun_msg_channels, params.testRunId, nothing)
-    if ch!==nothing
-        put!(
-            ch,
-            (
-                source=:controller,
-                msg=(;
-                    event=:cancel_test_run,
-                )
-            )
+    put!(
+        controller.controller.msg_channel,
+        (;
+            event=:cancel_testrun,
+            testrun_id=params.testRunId,
         )
-    end
+    )
 end
 
 function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, json_controller::JSONRPCTestItemController, token)
