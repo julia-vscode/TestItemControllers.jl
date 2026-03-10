@@ -62,12 +62,6 @@ end
 
 const create_testrun_request_type = RequestType("createTestRun", CreateTestRunParams, CreateTestRunResponse)
 
-@dict_readable struct CancelTestRunParams
-    testRunId::String
-end
-
-const cancel_testrun_notificationType = NotificationType("cancelTestRun", CancelTestRunParams)
-
 @dict_readable struct TerminateTestProcessParams
     testProcessId::String
 end

@@ -58,6 +58,7 @@ function create_testprocess(
     Base.ScopedValues.@with logging_node => "tp_$(testprocess_id[1:5])" @async try
         # These are not nothing while a testrun is going on
         testrun_channel = nothing
+        testrun_token = nothing
         test_setups = nothing
         coverage_root_uris = nothing
 
@@ -101,24 +102,69 @@ function create_testprocess(
                 state = :testrun_idle
 
                 testrun_channel = msg.testrun_channel
-                test_setups =msg.test_setups
+                testrun_token = msg.token
+                test_setups = msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
+
+                @async begin
+                    wait(testrun_token)
+                    try put!(msg_channel, (;event=:cancel_test_run)) catch end
+                end
             elseif msg.event == :cancel_test_run
-                CancellationTokens.cancel(julia_proc_cs)
-                kill(jl_process)
+                if state == :idle
+                    # Already idle, nothing to cancel (async watcher fired after :end_testrun)
+                    continue
+                end
+
+                @info "Cancelling test run on process $testprocess_id (state: $state)"
+
+                if jl_process !== nothing && endpoint !== nothing
+                    # Attempt graceful shutdown first
+                    local saved_endpoint = endpoint
+                    local saved_process = jl_process
+                    @async try
+                        shutdown_timeout = CancellationTokens.CancellationTokenSource(2.0)
+                        shutdown_done = Channel{Bool}(1)
+                        @async begin
+                            try
+                                JSONRPC.send(
+                                    saved_endpoint,
+                                    TestItemServerProtocol.testserver_shutdown_request_type,
+                                    nothing
+                                )
+                                put!(shutdown_done, true)
+                            catch
+                                put!(shutdown_done, false)
+                            end
+                        end
+                        @async begin
+                            wait(CancellationTokens.get_token(shutdown_timeout))
+                            try put!(shutdown_done, false) catch end
+                        end
+                        graceful = take!(shutdown_done)
+                        if !graceful && process_running(saved_process)
+                            kill(saved_process)
+                        end
+                    catch err
+                        try kill(saved_process) catch end
+                    end
+                elseif jl_process !== nothing
+                    try kill(jl_process) catch end
+                end
+
+                if julia_proc_cs !== nothing
+                    try CancellationTokens.cancel(julia_proc_cs) catch end
+                end
                 jl_process = nothing
                 endpoint = nothing
                 julia_proc_cs = nothing
-                # put!(msg_channel, (;event = :start))
 
-                # tp.killed = true
-    #                 @info "Now canceling $(tp.id)"
-    #                 put!(tp.controller_msg_channel, (source=:testprocess, msg=(event=:test_process_status_changed, id=tp.id, status="Canceling")))
-    #                 @info "Canceling process $(tp.id)"
-    #                 kill(tp.jl_process)
+                queued_tests_n = 0
+                empty!(finished_testitems)
+                testitems_to_run_when_ready = nothing
 
-    #                 put!(tp.controller_msg_channel, (source=:testprocess, msg=(event=:test_process_terminated, id=tp.id)))
-    #                 break
+                state = :testrun_killed_after_revise_fail
+                put!(msg_channel, (;event = :start))
             elseif msg.event == :revise
                 state == :testrun_idle || error("Invalid state transition")
                 state = :testrun_revising
@@ -167,7 +213,11 @@ function create_testprocess(
                 state = :testprocess_starting
 
                 julia_proc_cs === nothing || error("Invalid state for julia_proc_cs")
-                julia_proc_cs = CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
+                julia_proc_cs = if testrun_token !== nothing
+                    CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs), testrun_token)
+                else
+                    CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
+                end
 
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
@@ -185,6 +235,7 @@ function create_testprocess(
                 state = :idle
 
                 testrun_channel = nothing
+                testrun_token = nothing
                 test_setups = nothing
                 coverage_root_uris = nothing
             elseif msg.event == :testprocess_launched

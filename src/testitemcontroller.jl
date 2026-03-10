@@ -66,7 +66,6 @@ function Base.run(
         testprocess_statuschanged=nothing,
         testprocess_output=nothing
     )
-    testrun_channels = Dict{String,Channel}()
 
     while true
         msg = take!(controller.msg_channel)
@@ -104,21 +103,6 @@ function Base.run(
             if testprocess_terminated!==nothing
                 testprocess_terminated(msg.id)
             end
-        elseif msg.event == :cancel_testrun
-            ch = get(testrun_channels, msg.testrun_id, nothing)
-            if ch !== nothing
-                put!(
-                    ch,
-                    (
-                        source=:controller,
-                        msg=(;
-                            event=:cancel_test_run,
-                        )
-                    )
-                )
-            end
-        elseif msg.event == :testrun_complete
-            delete!(testrun_channels, msg.testrun_id)
         elseif msg.event == :return_to_pool
             put!(msg.testprocess.msg_channel, (;event=:end_testrun))
             msg.testprocess.idle = true
@@ -126,7 +110,6 @@ function Base.run(
                 testprocess_statuschanged(msg.testprocess.id, "Idle")
             end
         elseif msg.event == :get_procs_for_testrun
-            testrun_channels[msg.testrun_id] = msg.testrun_msg_queue
 
             our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
 
@@ -149,7 +132,8 @@ function Base.run(
                             event = :start_testrun,
                             testrun_channel = msg.testrun_msg_queue,
                             test_setups = msg.test_setups,
-                            coverage_root_uris = msg.coverage_root_uris
+                            coverage_root_uris = msg.coverage_root_uris,
+                            token = msg.testrun_token
                         )
                     )
 
@@ -232,7 +216,8 @@ function Base.run(
                             event = :start_testrun,
                             testrun_channel = msg.testrun_msg_queue,
                             test_setups = msg.test_setups,
-                            coverage_root_uris = msg.coverage_root_uris
+                            coverage_root_uris = msg.coverage_root_uris,
+                            token = msg.testrun_token
                         )
                     )
 
@@ -340,8 +325,16 @@ function execute_testrun(
 
         state = :created
 
+        testrun_cs = CancellationTokens.CancellationTokenSource(token)
+        testrun_token = CancellationTokens.get_token(testrun_cs)
+
         testrun_msg_queue = Channel{Any}(Inf)
         our_procs = nothing
+
+        @async begin
+            wait(token)
+            try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
+        end
 
         valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
         test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
@@ -430,7 +423,8 @@ function execute_testrun(
                         code = i.code
                     ) for i in test_setups],
                 coverage_root_uris = profiles[1].coverage_root_uris,
-                testrun_msg_queue = testrun_msg_queue
+                testrun_msg_queue = testrun_msg_queue,
+                testrun_token = testrun_token
             )
         )
 
@@ -464,12 +458,6 @@ function execute_testrun(
                     for i in processes_that_are_ready
                         put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
                     end
-                elseif msg.msg.event==:cancel_test_run
-                    for i in Iterators.flatten(values(our_procs))
-                        put!(i.msg_channel, (; event=:cancel_test_run))
-                    end
-
-                    # TODO What then?
                 else
                     error("Unknown message")
                 end
@@ -669,12 +657,46 @@ function execute_testrun(
                 else
                     error("Unknown message")
                 end
+            elseif msg.source==:token
+                if msg.msg.event == :cancelled
+                    @info "Test run $testrun_id cancelled via token"
+
+                    CancellationTokens.cancel(testrun_cs)
+
+                    # Report all remaining test items as errored
+                    for (id, item) in valid_test_items
+                        testitem_errored_callback(
+                            testrun_id,
+                            id,
+                            TestItemControllerProtocol.TestMessage[
+                                TestItemControllerProtocol.TestMessage(
+                                    message = "Test run was cancelled.",
+                                    expectedOutput = missing,
+                                    actualOutput = missing,
+                                    uri = item.uri,
+                                    line = item.line,
+                                    column = item.column
+                                )
+                            ],
+                            missing
+                        )
+                    end
+
+                    # Return all processes to the pool
+                    if our_procs !== nothing
+                        for proc in Iterators.flatten(values(our_procs))
+                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
+                        end
+                    end
+
+                    break
+                else
+                    error("Unknown message")
+                end
             else
                 error("Unknown source")
             end
         end
-
-        put!(controller.msg_channel, (event=:testrun_complete, testrun_id=testrun_id))
 
         return coverage_results
         end
