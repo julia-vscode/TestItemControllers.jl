@@ -120,7 +120,7 @@ function create_testprocess(
                     wait(testrun_token)
                     try put!(msg_channel, (;event=:cancel_test_run)) catch end
                 catch err
-                    err isa Base.InvalidStateException && return  # interrupted during cleanup
+                    (err isa InterruptException || err isa Base.InvalidStateException) && return  # interrupted during cleanup
                     @error "Error in testrun cancellation watcher" testprocess_id exception=(err, catch_backtrace())
                 end
             elseif msg.event == :cancel_test_run
