@@ -332,17 +332,19 @@ function execute_testrun(
 
         state = :created
 
-        testrun_cs = CancellationTokens.CancellationTokenSource(token)
+        testrun_cs = token === nothing ? CancellationTokens.CancellationTokenSource() : CancellationTokens.CancellationTokenSource(token)
         testrun_token = CancellationTokens.get_token(testrun_cs)
 
         testrun_msg_queue = Channel{Any}(Inf)
         our_procs = nothing
 
-        @async try
-            wait(token)
-            try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
-        catch err
-            @error "Error in testrun cancellation watcher" testrun_id exception=(err, catch_backtrace())
+        if token !== nothing
+            @async try
+                wait(token)
+                try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
+            catch err
+                @error "Error in testrun cancellation watcher" testrun_id exception=(err, catch_backtrace())
+            end
         end
 
         valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
