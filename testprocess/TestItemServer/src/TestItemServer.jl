@@ -93,35 +93,6 @@ function format_error_message(err, bt)
     end
 end
 
-function extract_stacktrace(st::Vector{Base.StackTraces.StackFrame})
-    st = copy(st)
-
-    # Remove C frames explicitly
-    filter!(f -> !f.from_c, st)
-
-    # Remove known Base dispatch entry points by symbol
-    for sym in (:include_string, :invokelatest, :include, :_include, :eval)
-        Base.StackTraces.remove_frames!(st, sym)
-    end
-
-    # Keep only frames with absolute file paths that exist on disk.
-    # This naturally excludes Julia internals (boot.jl, loading.jl, etc.)
-    # and framework code without needing ad-hoc path substring checks.
-    frames = TestItemServerProtocol.StackFrame[]
-    for frame in st
-        file = string(frame.file)
-        isabspath(file) || continue
-        isfile(file) || continue
-        push!(frames, TestItemServerProtocol.StackFrame(
-            uri = filepath2uri(file),
-            line = frame.line,
-            character = 1,
-            label = string(frame.func)
-        ))
-    end
-    return isempty(frames) ? missing : frames
-end
-
 function clear_coverage_data()
     @static if VERSION >= v"1.11.0-rc2"
         try
@@ -240,13 +211,10 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                         messages = [
                             TestItemServerProtocol.TestMessage(
                                 error_message,
-                                missing,
-                                missing,
                                 TestItemServerProtocol.Location(
                                     isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
                                     TestItemServerProtocol.Position(max(1, error_line), 1)
-                                ),
-                                extract_stacktrace(st)
+                                )
                             )
                         ],
                         duration = missing
@@ -291,7 +259,6 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 end
             catch err
                 bt = catch_backtrace()
-                st = stacktrace(bt)
                 error_message = format_error_message(err, bt)
 
                 return (
@@ -301,13 +268,10 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                         messages = [
                             TestItemServerProtocol.TestMessage(
                                 error_message,
-                                missing,
-                                missing,
                                 TestItemServerProtocol.Location(
                                     params.uri,
                                     TestItemServerProtocol.Position(params.line, 1)
-                                ),
-                                extract_stacktrace(st)
+                                )
                             )
                         ],
                         duration = missing
@@ -419,13 +383,10 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                     messages = [
                         TestItemServerProtocol.TestMessage(
                             error_message,
-                            missing,
-                            missing,
                             TestItemServerProtocol.Location(
                                 isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
                                 TestItemServerProtocol.Position(max(1, error_line), 1)
-                            ),
-                            extract_stacktrace(st)
+                            )
                         )
                     ],
                     duration = missing
@@ -494,18 +455,10 @@ end
 
 function create_test_message_for_failed(i)
     (expected, actual) = extract_expected_and_actual(i)
-    st = if i isa Test.Error && i.backtrace !== nothing
-        extract_stacktrace(stacktrace(i.backtrace))
-    else
-        missing
-    end
-    return TestItemServerProtocol.TestMessage(
-        sprint(Base.show, i),
+    return TestItemServerProtocol.TestMessage(sprint(Base.show, i),
         expected,
         actual,
-        TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)),
-        st
-    )
+        TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)))
 end
 
 function extract_expected_and_actual(result)

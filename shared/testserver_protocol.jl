@@ -26,22 +26,14 @@ end
     position::Position
 end
 
-@dict_readable struct StackFrame <: JSONRPC.Outbound
-    uri::String
-    line::Int
-    character::Int
-    label::String
-end
-
 @dict_readable struct TestMessage <: JSONRPC.Outbound
     message::String
     expectedOutput::Union{String,Missing}
     actualOutput::Union{String,Missing}
     location::Location
-    stackTrace::Union{Missing,Vector{StackFrame}}
 end
 
-TestMessage(message, location) = TestMessage(message, missing, missing, location, missing)
+TestMessage(message, location) = TestMessage(message, missing, missing, location)
 
 @dict_readable struct RunTestItem <: JSONRPC.Outbound
     id::String

@@ -549,15 +549,7 @@ function execute_testrun(
                                             actualOutput = i.actualOutput,
                                             uri = i.location.uri,
                                             line = i.location.position.line,
-                                            column = i.location.position.character,
-                                            stackTrace = i.stackTrace isa Missing ? missing : TestItemControllerProtocol.TestMessageStackFrame[
-                                                TestItemControllerProtocol.TestMessageStackFrame(
-                                                    uri = f.uri,
-                                                    line = f.line,
-                                                    column = f.character,
-                                                    label = f.label
-                                                ) for f in i.stackTrace
-                                            ]
+                                            column = i.location.position.character
                                         ) for i in msg.msg.messages
                                     ],
                                     missing
@@ -573,15 +565,7 @@ function execute_testrun(
                                             actualOutput = missing,
                                             uri = i.location.uri,
                                             line = i.location.position.line,
-                                            column = i.location.position.character,
-                                            stackTrace = i.stackTrace isa Missing ? missing : TestItemControllerProtocol.TestMessageStackFrame[
-                                                TestItemControllerProtocol.TestMessageStackFrame(
-                                                    uri = f.uri,
-                                                    line = f.line,
-                                                    column = f.character,
-                                                    label = f.label
-                                                ) for f in i.stackTrace
-                                            ]
+                                            column = i.location.position.character
                                         ) for i in msg.msg.messages
                                     ],
                                     missing
