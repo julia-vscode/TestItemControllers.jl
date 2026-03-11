@@ -78,7 +78,7 @@ function Base.run(
         @info "Msg $(msg.event)" msg
 
         if msg.event == :shutdown
-            @info "Broadcasting shutdown to test processes" process_count=sum(length, values(controller.testprocesses))
+            @info "Broadcasting shutdown to test processes" process_count=sum(length, values(controller.testprocesses), 0)
             for i in Iterators.flatten(values(controller.testprocesses))
                 put!(
                     i.msg_channel,
@@ -269,7 +269,7 @@ function Base.run(
                 end
             end
 
-            @info "Controller acquired processes for test run" testrun_id=msg.testrun_id proc_count=sum(length, values(our_procs))
+            @info "Controller acquired processes for test run" testrun_id=msg.testrun_id proc_count=sum(length, values(our_procs), 0)
             put!(
                 msg.testrun_msg_queue,
                 (
