@@ -31,11 +31,11 @@ let
         TestItemServer.serve(
             ARGS[1],
             ARGS[2],
-            has_error_handler ? (err, bt) -> global_err_handler(err, bt, Base.ARGS[4], "Test Process") : nothing)
+            has_error_handler ? (err, bt) -> Base.invokelatest(global_err_handler, err, bt, Base.ARGS[4], "Test Process") : nothing)
     catch err
         bt = catch_backtrace()
         if has_error_handler
-            global_err_handler(err, bt, Base.ARGS[4], "Test Process")
+            Base.invokelatest(global_err_handler, err, bt, Base.ARGS[4], "Test Process")
         else
             Base.display_error(err, bt)
         end

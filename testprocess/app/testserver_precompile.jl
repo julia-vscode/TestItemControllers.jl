@@ -30,7 +30,7 @@ let
     catch err
         bt = catch_backtrace()
         if has_error_handler
-            global_err_handler(err, bt, Base.ARGS[2], "Test Process")
+            Base.invokelatest(global_err_handler, err, bt, Base.ARGS[2], "Test Process")
         else
             rethrow(err)
         end
