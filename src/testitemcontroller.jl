@@ -78,7 +78,7 @@ function Base.run(
         @info "Msg $(msg.event)" msg
 
         if msg.event == :shutdown
-            @info "Broadcasting shutdown to test processes" process_count=sum(length, values(controller.testprocesses), 0)
+            @info "Broadcasting shutdown to test processes" process_count=sum(length, values(controller.testprocesses), init=0)
             for i in Iterators.flatten(values(controller.testprocesses))
                 put!(
                     i.msg_channel,
@@ -269,7 +269,7 @@ function Base.run(
                 end
             end
 
-            @info "Controller acquired processes for test run" testrun_id=msg.testrun_id proc_count=sum(length, values(our_procs), 0)
+            @info "Controller acquired processes for test run" testrun_id=msg.testrun_id proc_count=sum(length, values(our_procs), init=0)
             put!(
                 msg.testrun_msg_queue,
                 (
@@ -493,7 +493,7 @@ function execute_testrun(
                 if msg.msg.event==:procs_acquired
                     state == :procs_requested || error("Invalid state transition from $state")
                     our_procs = msg.msg.procs
-                    @info "Received processes from controller" testrun_id proc_count=sum(length, values(our_procs))
+                    @info "Received processes from controller" testrun_id proc_count=sum(length, values(our_procs), init=0)
 
                     # Now distribute test items over test processes
                     for (k,v) in pairs(our_procs)

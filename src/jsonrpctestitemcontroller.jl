@@ -162,7 +162,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
             @info "Received JSON-RPC message" method=msg.method
 
             @async try
-                @info "Dispatching JSON-RPC message asynchronously" method=get(msg, :method, missing)
+                @info "Dispatching JSON-RPC message asynchronously" method=msg.method
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
                 bt = catch_backtrace()
