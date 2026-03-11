@@ -44,10 +44,12 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
 end
 
 function shutdown(controller::TestItemController)
+    @debug "Queueing controller shutdown"
     put!(controller.msg_channel, (;event=:shutdown))
 end
 
 function terminate_test_process(controller::TestItemController, id::String)
+    @debug "Queueing test process termination" id
     for v in values(controller.testprocesses)
         for p in v
             if p.id == id
@@ -72,6 +74,7 @@ function Base.run(
         @debug "Msg $(msg.event)" msg
 
         if msg.event == :shutdown
+            @debug "Broadcasting shutdown to test processes" process_count=sum(length, values(controller.testprocesses))
             for i in Iterators.flatten(values(controller.testprocesses))
                 put!(
                     i.msg_channel,
@@ -82,15 +85,18 @@ function Base.run(
             end
             break
         elseif msg.event == :test_process_status_changed
+            @debug "Forwarding test process status change" id=msg.id status=msg.status
             # Inform the user via callback
             if testprocess_statuschanged!==nothing
                 testprocess_statuschanged(msg.id, msg.status)
             end
         elseif msg.event == :testprocess_output
+            @debug "Forwarding test process output" id=msg.id ncodeunits=ncodeunits(msg.output)
             if testprocess_output!==nothing
                 testprocess_output(msg.id, msg.output)
             end
         elseif msg.event == :test_process_terminated
+            @debug "Removing terminated test process from pool" id=msg.id
             for procs in values(controller.testprocesses)
                 ind = findfirst(i->i.id==msg.id, procs)
                 if ind!==nothing
@@ -107,14 +113,17 @@ function Base.run(
             if msg.testprocess.idle
                 # Already returned to pool (e.g. via "nothing to steal" path),
                 # skip duplicate :end_testrun to avoid invalid state transition.
+                @debug "Ignoring duplicate return_to_pool" id=msg.testprocess.id
                 continue
             end
+            @debug "Returning test process to pool" id=msg.testprocess.id
             put!(msg.testprocess.msg_channel, (;event=:end_testrun))
             msg.testprocess.idle = true
             if testprocess_statuschanged!==nothing
                 testprocess_statuschanged(msg.testprocess.id, "Idle")
             end
         elseif msg.event == :get_procs_for_testrun
+            @debug "Acquiring test processes for test run" testrun_id=msg.testrun_id env_count=length(msg.proc_count_by_env)
 
             our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
 
@@ -127,10 +136,13 @@ function Base.run(
 
                 existing_idle_procs = filter(i->i.idle, testprocesses)
 
+                @debug "Inspecting environment pool" package_name=k.package_name requested=v existing=length(testprocesses) idle=length(existing_idle_procs) mode=k.mode
+
                 @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv: $(k.env)\n\nWe need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
 
                 # Grab existing procs
                 for p in Iterators.take(existing_idle_procs, v)
+                    @debug "Reusing idle test process" id=p.id package_name=k.package_name testrun_id=msg.testrun_id
                     put!(
                         p.msg_channel,
                         (
@@ -145,6 +157,7 @@ function Base.run(
                     p.idle = false
                     push!(our_procs[k], p)
 
+                    @debug "Queueing revise on reused process" id=p.id env_hash=msg.env_content_hash_by_env[k]
                     put!(p.msg_channel, (event=:revise, test_env_content_hash=msg.env_content_hash_by_env[k]))
                 end
 
@@ -208,6 +221,8 @@ function Base.run(
                     this_is_the_precompile_proc = precompile_required && !identified_precompile_proc
                     identified_precompile_proc =true
 
+                    @debug "Creating test process" package_name=k.package_name testrun_id=msg.testrun_id precompile=this_is_the_precompile_proc
+
                     testprocess_id, testprocess_msg_channel = create_testprocess(
                         controller.msg_channel,
                         k,
@@ -216,6 +231,7 @@ function Base.run(
                         controller.crash_reporting_pipename
                     )
 
+                    @debug "Queueing start_testrun on new process" id=testprocess_id testrun_id=msg.testrun_id
                     put!(
                         testprocess_msg_channel,
                         (
@@ -227,6 +243,7 @@ function Base.run(
                         )
                     )
 
+                    @debug "Queueing process start" id=testprocess_id
                     put!(
                         testprocess_msg_channel,
                         (;
@@ -246,6 +263,7 @@ function Base.run(
                 end
             end
 
+            @debug "Controller acquired processes for test run" testrun_id=msg.testrun_id proc_count=sum(length, values(our_procs))
             put!(
                 msg.testrun_msg_queue,
                 (
@@ -331,6 +349,12 @@ function execute_testrun(
         @info "Creating new test run"
 
         state = :created
+        function set_state!(new_state::Symbol; reason=nothing)
+            old_state = state
+            state = new_state
+            @debug "Test run state transition" testrun_id from=old_state to=new_state reason
+            return state
+        end
 
         testrun_cs = token === nothing ? CancellationTokens.CancellationTokenSource() : CancellationTokens.CancellationTokenSource(token)
         testrun_token = CancellationTokens.get_token(testrun_cs)
@@ -339,8 +363,10 @@ function execute_testrun(
         our_procs = nothing
 
         if token !== nothing
+            @debug "Starting test run cancellation watcher" testrun_id
             @async try
                 wait(token)
+                @debug "Cancellation token fired for test run" testrun_id
                 try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
             catch err
                 @error "Error in testrun cancellation watcher" testrun_id exception=(err, catch_backtrace())
@@ -355,6 +381,8 @@ function execute_testrun(
         testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
 
         env_content_hash_by_env = Dict{TestEnvironment,String}()
+
+        @debug "Prepared test run inputs" testrun_id valid_items=length(valid_test_items) invalid_items=length(test_items_without_package) profile_count=length(profiles)
 
         for i in values(valid_test_items)
             te = TestEnvironment(
@@ -393,6 +421,7 @@ function execute_testrun(
             chunks =  makechunks(v, n_procs)
 
             testitem_ids_by_env_chunked[k] = chunks
+            @debug "Chunked test items for environment" testrun_id package_name=k.package_name item_count=length(v) proc_count=n_procs chunk_sizes=length.(chunks)
         end
 
         # Finally, we send error notifications for all test items that didn't have a package
@@ -414,8 +443,9 @@ function execute_testrun(
             )
         end
 
-        state = :procs_requested
+        set_state!(:procs_requested; reason=:requested_processes)
 
+        @debug "Requesting processes from controller" testrun_id requested=Dict(k.package_name=>length(v) for (k,v) in testitem_ids_by_env_chunked)
         put!(
             controller.msg_channel,
             (
@@ -455,18 +485,21 @@ function execute_testrun(
                 if msg.msg.event==:procs_acquired
                     state == :procs_requested || error("Invalid state transition from $state")
                     our_procs = msg.msg.procs
+                    @debug "Received processes from controller" testrun_id proc_count=sum(length, values(our_procs))
 
                     # Now distribute test items over test processes
                     for (k,v) in pairs(our_procs)
                         for proc in v
                             stolen_testitem_ids_by_proc_id[proc.id] = String[]
                             testitem_ids_by_proc[proc.id] = pop!(testitem_ids_by_env_chunked[k])
+                            @debug "Assigned test items to process" testrun_id process_id=proc.id package_name=k.package_name assigned=length(testitem_ids_by_proc[proc.id])
                         end
                     end
 
-                    state = :all_procs_acquired
+                    set_state!(:all_procs_acquired; reason=:procs_acquired)
 
                     for i in processes_that_are_ready
+                        @debug "Dispatching buffered test items to ready process" testrun_id process_id=i.id assigned=length(testitem_ids_by_proc[i.id])
                         put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
                     end
                 else
@@ -477,22 +510,30 @@ function execute_testrun(
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
                     if state == :all_procs_acquired
+                        @debug "Process ready after acquisition, dispatching items immediately" testrun_id process_id=msg.msg.id assigned=length(testitem_ids_by_proc[msg.msg.id])
                         put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
                     else
+                        @debug "Process ready before acquisition finished, buffering" testrun_id process_id=msg.msg.id
                         push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
                     end
                 elseif msg.msg.event == :attach_debugger
+                    @debug "Forwarding debugger attach request" testrun_id process_id=msg.msg.id debug_pipe_name=msg.msg.debug_pipe_name
                     attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
                 elseif msg.msg.event == :precompile_done
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
+                    @debug "Process completed environment precompile" testrun_id process_id=msg.msg.testprocess_id package_name=msg.msg.env.package_name
+
                     for i in our_procs[msg.msg.env]
                         if i.id !== msg.msg.testprocess_id
+                            @debug "Notifying peer process that precompile completed" testrun_id source_process_id=msg.msg.testprocess_id target_process_id=i.id
                             put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
                         end
                     end
                 elseif msg.msg.event == :started
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
+                    @debug "Test item started" testrun_id testitem_id=msg.msg.testitemid
 
                     testitem_started_callback(
                         testrun_id,
@@ -500,6 +541,8 @@ function execute_testrun(
                     )
                 elseif msg.msg.event == :append_output
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
+
+                    @debug "Appending test item output" testrun_id testitem_id=msg.msg.testitemid ncodeunits=ncodeunits(msg.msg.output)
 
                     append_output_callback(
                         testrun_id,
@@ -512,6 +555,7 @@ function execute_testrun(
                     stolen_idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
 
                     if msg.msg.event == :skipped_stolen
+                        @debug "Victim confirmed skipped stolen test item" testrun_id process_id=msg.msg.test_process_id testitem_id=msg.msg.testitemid
                         # Victim confirms skip — clean up stolen tracking
                         if stolen_idx !== nothing
                             deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
@@ -523,6 +567,7 @@ function execute_testrun(
                         end
 
                         if haskey(valid_test_items, msg.msg.testitemid)
+                            @debug "Processing first terminal result for test item" testrun_id process_id=msg.msg.test_process_id event=msg.msg.event testitem_id=msg.msg.testitemid remaining_before=length(valid_test_items)
                             # First result for this item — process it
                             delete!(valid_test_items, msg.msg.testitemid)
                             proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
@@ -574,6 +619,7 @@ function execute_testrun(
                                 )
                             end
                         else
+                            @debug "Ignoring duplicate terminal result for test item" testrun_id process_id=msg.msg.test_process_id event=msg.msg.event testitem_id=msg.msg.testitemid
                             # Duplicate — thief reported result for item victim already handled.
                             # Clean up the thief's tracking.
                             proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
@@ -602,6 +648,8 @@ function execute_testrun(
                         if test_process === nothing
                             error("This should never happen")
                         end
+
+                        @debug "Process exhausted assigned work" testrun_id process_id=test_process.id package_name=test_env.package_name
 
                         test_process_to_steal_from = nothing
                         # Now we look through all test processes with the same env that have more than 1 pending test item to run
@@ -637,6 +685,7 @@ function execute_testrun(
 
                             append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
 
+                            @debug "Queueing steal redistribution" testrun_id from_process_id=test_process_to_steal_from.id to_process_id=test_process.id stolen=length(testitem_ids_to_steal)
                             put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
 
                             put!(test_process.msg_channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_to_steal)))
@@ -657,6 +706,8 @@ function execute_testrun(
                             end
                         end
 
+                        @debug "Test run completed after processing terminal result" testrun_id coverage_files=ismissing(coverage_results) ? missing : length(coverage_results)
+
                         break
 
                     end
@@ -665,6 +716,7 @@ function execute_testrun(
 
                     # Resolve all remaining test items assigned to this process as skipped
                     terminated_proc_id = msg.msg.id
+                    @debug "Handling test process termination during test run" testrun_id process_id=terminated_proc_id remaining=length(valid_test_items)
                     if haskey(testitem_ids_by_proc, terminated_proc_id)
                         for testitem_id in testitem_ids_by_proc[terminated_proc_id]
                             if haskey(valid_test_items, testitem_id)
@@ -703,6 +755,7 @@ function execute_testrun(
                             end
                         end
 
+                        @debug "Test run completed after process termination" testrun_id coverage_files=ismissing(coverage_results) ? missing : length(coverage_results)
                         break
                     end
                 else
@@ -711,6 +764,7 @@ function execute_testrun(
             elseif msg.source==:token
                 if msg.msg.event == :cancelled
                     @info "Test run $testrun_id cancelled via token"
+                    @debug "Cancelling test run state machine" testrun_id remaining=length(valid_test_items)
 
                     CancellationTokens.cancel(testrun_cs)
 
@@ -722,6 +776,7 @@ function execute_testrun(
                     # Return all processes to the pool
                     if our_procs !== nothing
                         for proc in Iterators.flatten(values(our_procs))
+                            @debug "Returning process to pool after cancellation" testrun_id process_id=proc.id
                             put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
                         end
                     end
@@ -735,6 +790,7 @@ function execute_testrun(
             end
         end
 
+        @debug "Leaving test run event loop" testrun_id state remaining=length(valid_test_items)
         return coverage_results
         end
 end
