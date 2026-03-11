@@ -11,6 +11,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 Unicode = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 
 [extras]
+JuliaWorkspaces = "e554591c-7f10-434f-9f27-2097f62a04fd"
 TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
@@ -18,4 +19,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 julia = "1"
 
 [targets]
-test = ["Test", "TestItemRunner"]
+test = ["JuliaWorkspaces", "Test", "TestItemRunner"]
