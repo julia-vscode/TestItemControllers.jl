@@ -57,7 +57,7 @@
         return (items=items, setups=setups)
     end
 
-    function make_test_profile(; mode="Run", max_procs=1, coverage_root_uris=nothing)
+    function make_test_profile(; mode="Run", max_procs=1, coverage_root_uris=nothing, log_level=:Debug)
         TestProfile(
             "test-profile-1",
             "Test Profile",
@@ -67,13 +67,14 @@
             Dict{String,Union{String,Nothing}}(),
             max_procs,
             mode,
-            coverage_root_uris
+            coverage_root_uris,
+            log_level
         )
     end
 
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing)
-        controller = TestItemController()
-        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug)
+        controller = TestItemController(log_level=log_level)
+        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris, log_level=log_level)
         testrun_id = string(UUIDs.uuid4())
 
         events = NamedTuple[]

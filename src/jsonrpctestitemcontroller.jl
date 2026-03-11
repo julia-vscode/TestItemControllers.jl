@@ -35,7 +35,8 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.juliaEnv,
                 i.maxProcessCount,
                 i.mode,
-                coalesce(i.coverageRootUris,nothing)
+                coalesce(i.coverageRootUris,nothing),
+                jr_controller.controller.log_level
             ) for i in params.testProfiles
         ],
         [

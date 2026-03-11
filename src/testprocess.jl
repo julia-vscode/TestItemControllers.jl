@@ -61,6 +61,7 @@ function create_testprocess(
         testrun_token = nothing
         test_setups = nothing
         coverage_root_uris = nothing
+        log_level = :Info
 
         # These are nothing if no Julia process is up and running
         jl_process = nothing
@@ -125,6 +126,7 @@ function create_testprocess(
                 testrun_token = msg.token
                 test_setups = msg.test_setups
                 coverage_root_uris = msg.coverage_root_uris
+                log_level = msg.log_level
 
                 @debug "Registered test run on process" testprocess_id has_token=testrun_token !== nothing setup_count=length(test_setups) coverage_root_uris_count=coverage_root_uris === nothing ? 0 : length(coverage_root_uris)
 
@@ -391,6 +393,7 @@ function create_testprocess(
                         TestItemServerProtocol.configure_testrun_request_type,
                         TestItemServerProtocol.ConfigureTestRunRequestParams(
                             mode = env.mode,
+                            logLevel = string(log_level),
                             coverageRootUris = something(coverage_root_uris,missing),
                             testSetups = test_setups
                         )

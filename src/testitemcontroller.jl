@@ -26,10 +26,13 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
     error_handler_file::Union{Nothing,String}
     crash_reporting_pipename::Union{Nothing,String}
 
+    log_level::Symbol
+
     function TestItemController(
         err_handler::ERR_HANDLER=nothing;
         error_handler_file=nothing,
-        crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
+        crash_reporting_pipename=nothing,
+        log_level::Symbol=:Info) where {ERR_HANDLER<:Union{Function,Nothing}}
 
         return new{ERR_HANDLER}(
             err_handler,
@@ -38,7 +41,8 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
             Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
             Set{TestEnvironment}(),
             error_handler_file,
-            crash_reporting_pipename
+            crash_reporting_pipename,
+            log_level
         )
     end
 end
@@ -150,6 +154,7 @@ function Base.run(
                             testrun_channel = msg.testrun_msg_queue,
                             test_setups = msg.test_setups,
                             coverage_root_uris = msg.coverage_root_uris,
+                            log_level = msg.log_level,
                             token = msg.testrun_token
                         )
                     )
@@ -239,6 +244,7 @@ function Base.run(
                             testrun_channel = msg.testrun_msg_queue,
                             test_setups = msg.test_setups,
                             coverage_root_uris = msg.coverage_root_uris,
+                            log_level = msg.log_level,
                             token = msg.testrun_token
                         )
                     )
@@ -298,6 +304,7 @@ struct TestProfile
     max_process_count::Int
     mode::String
     coverage_root_uris::Union{Nothing,Vector{String}}
+    log_level::Symbol
 end
 
 struct TestItemDetail
@@ -464,6 +471,7 @@ function execute_testrun(
                         code = i.code
                     ) for i in test_setups],
                 coverage_root_uris = profiles[1].coverage_root_uris,
+                log_level = profiles[1].log_level,
                 testrun_msg_queue = testrun_msg_queue,
                 testrun_token = testrun_token
             )

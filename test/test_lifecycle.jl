@@ -16,7 +16,7 @@
 end
 
 @testitem "Terminate specific test process" begin
-    tic = TestItemController()
+    tic = TestItemController(log_level=:Debug)
 
     controller_finished = Channel(1)
 

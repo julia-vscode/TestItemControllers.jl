@@ -8,7 +8,7 @@
     passing_items = filter(i -> i.label == "add works", discovered.items)
     @test length(passing_items) == 1
 
-    controller = TestItemController()
+    controller = TestItemController(log_level=:Debug)
     profile = TestHelpers.make_test_profile()
 
     process_created_ids = String[]

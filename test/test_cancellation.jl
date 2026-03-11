@@ -6,7 +6,7 @@
     pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
     discovered = TestHelpers.discover_test_items(pkg_path)
 
-    controller = TestItemController()
+    controller = TestItemController(log_level=:Debug)
     profile = TestHelpers.make_test_profile()
     testrun_id = string(UUIDs.uuid4())
 
