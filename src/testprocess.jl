@@ -84,16 +84,16 @@ function create_testprocess(
         function set_state!(new_state::Symbol; reason=nothing)
             old_state = state
             state = new_state
-            @info "Test process state transition" testprocess_id from=old_state to=new_state reason queued_tests_n finished=length(finished_testitems)
+            @debug "Test process state transition" testprocess_id from=old_state to=new_state reason queued_tests_n finished=length(finished_testitems)
             return state
         end
 
         while true
             msg = take!(msg_channel)
-            @info "Msg $(msg.event)" msg queued_tests_n length(finished_testitems)
+            @debug "Msg $(msg.event)" msg queued_tests_n length(finished_testitems)
 
             if msg.event == :shutdown
-                @info "Sending shutdown request to active endpoint" testprocess_id state has_endpoint=endpoint !== nothing
+                @debug "Sending shutdown request to active endpoint" testprocess_id state has_endpoint=endpoint !== nothing
                 CancellationTokens.cancel(cs)
                 @async try
                     JSONRPC.send(
@@ -105,7 +105,7 @@ function create_testprocess(
                     @error "Error sending shutdown request" testprocess_id state exception=(err, catch_backtrace())
                 end
             elseif msg.event == :terminate
-                @info "Terminating test process $testprocess_id (state: $state)"
+                @info "Terminating test process"
                 if jl_process !== nothing
                     try CancellationTokens.cancel(julia_proc_cs) catch end
                     try kill(jl_process) catch end
@@ -128,12 +128,12 @@ function create_testprocess(
                 coverage_root_uris = msg.coverage_root_uris
                 log_level = msg.log_level
 
-                @info "Registered test run on process" testprocess_id has_token=testrun_token !== nothing setup_count=length(test_setups) coverage_root_uris_count=coverage_root_uris === nothing ? 0 : length(coverage_root_uris)
+                @debug "Registered test run on process" testprocess_id has_token=testrun_token !== nothing setup_count=length(test_setups) coverage_root_uris_count=coverage_root_uris === nothing ? 0 : length(coverage_root_uris)
 
                 testrun_watcher_task = @async try
-                    @info "Waiting for test run cancellation on process" testprocess_id
+                    @debug "Waiting for test run cancellation on process" testprocess_id
                     wait(testrun_token)
-                    @info "Process cancellation watcher fired" testprocess_id
+                    @debug "Process cancellation watcher fired" testprocess_id
                     try put!(msg_channel, (;event=:cancel_test_run)) catch end
                 catch err
                     (err isa InterruptException || err isa Base.InvalidStateException) && return  # interrupted during cleanup
@@ -145,14 +145,14 @@ function create_testprocess(
                     continue
                 end
 
-                @info "Cancelling test run on process $testprocess_id (state: $state)"
+                @debug "Cancelling test run on process" testprocess_id state
 
                 if jl_process !== nothing && endpoint !== nothing
                     # Attempt graceful shutdown first
                     local saved_endpoint = endpoint
                     local saved_process = jl_process
                     @async try
-                        @info "Attempting graceful shutdown of Julia process" testprocess_id
+                        @debug "Attempting graceful shutdown of Julia process" testprocess_id
                         shutdown_timeout = CancellationTokens.CancellationTokenSource(2.0)
                         shutdown_done = Channel{Bool}(1)
                         @async try
@@ -198,7 +198,7 @@ function create_testprocess(
                 testitems_to_run_when_ready = nothing
 
                 set_state!(:testrun_killed_after_revise_fail; reason=:cancel_test_run)
-                @info "Queueing process restart after cancellation" testprocess_id
+                @debug "Queueing process restart after cancellation" testprocess_id
                 put!(msg_channel, (;event = :start))
             elseif msg.event == :revise
                 state == :testrun_idle || error("Invalid state transition")
@@ -207,7 +207,7 @@ function create_testprocess(
                     # Process was killed during cancellation but not yet restarted —
                     # skip revise and go straight to restart path.
                     set_state!(:testrun_killed_after_revise_fail; reason=:revise_without_endpoint)
-                    @info "Skipping revise because endpoint is gone" testprocess_id
+                    @debug "Skipping revise because endpoint is gone" testprocess_id
                     put!(msg_channel, (;event = :start))
                     continue
                 end
@@ -234,10 +234,10 @@ function create_testprocess(
                     end
 
                     if !needs_restart
-                        @info "Revise completed without restart" testprocess_id
+                        @debug "Revise completed without restart" testprocess_id
                         put!(msg_channel, (;event=:testprocess_activated))
                     else
-                        @info "Revise requested restart" testprocess_id
+                        @debug "Revise requested restart" testprocess_id
                         put!(msg_channel, (;event=:restart))
                     end
                 catch err
@@ -248,7 +248,7 @@ function create_testprocess(
                 state == :testrun_revising || error("Invalid state transition")
                 set_state!(:testrun_killed_after_revise_fail; reason=:restart)
 
-                @info "Revise could not handle changes or test env was changed, restarting process"
+                @debug "Revise could not handle changes or test env was changed, restarting process"
                 if julia_proc_cs !== nothing
                     CancellationTokens.cancel(julia_proc_cs)
                 end
@@ -262,7 +262,7 @@ function create_testprocess(
             elseif msg.event == :start
                 if state == :idle
                     # Stale :start from a cancelled test run that already ended — ignore
-                    @info "Ignoring stale start request" testprocess_id
+                    @debug "Ignoring stale start request" testprocess_id
                     continue
                 end
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition")
@@ -275,7 +275,7 @@ function create_testprocess(
                     CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(cs))
                 end
 
-                @info "Launching Julia process for test process" testprocess_id linked_to_testrun=testrun_token !== nothing
+                @debug "Launching Julia process for test process" testprocess_id linked_to_testrun=testrun_token !== nothing
 
                 put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Launching"))
                 @async try
@@ -288,7 +288,7 @@ function create_testprocess(
             elseif msg.event == :end_testrun
                 if state == :idle
                     # Already idle, nothing to do (defensive guard against duplicate :end_testrun)
-                    @info "Ignoring duplicate end_testrun" testprocess_id
+                    @debug "Ignoring duplicate end_testrun" testprocess_id
                     continue
                 end
                 if state == :running_tests
@@ -306,7 +306,7 @@ function create_testprocess(
                     testrun_token = nothing
                     test_setups = nothing
                     coverage_root_uris = nothing
-                    @info "Cleared test run metadata while process is still starting" testprocess_id
+                    @debug "Cleared test run metadata while process is still starting" testprocess_id
                     continue
                 end
                 state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition from $state")
@@ -331,7 +331,7 @@ function create_testprocess(
                     set_state!(:idle; reason=:launched_without_testrun)
                 elseif is_precompile_process || precompile_done
                     set_state!(is_precompile_process ? :testrun_precompiling : :testrun_activating; reason=:testprocess_launched)
-                    @info "Activating environment after launch" testprocess_id precompile_process=is_precompile_process precompile_done
+                    @debug "Activating environment after launch" testprocess_id precompile_process=is_precompile_process precompile_done
                     @async try
                         JSONRPC.send(
                             endpoint,
@@ -357,7 +357,7 @@ function create_testprocess(
                     set_state!(:activating_env; reason=:precompile_by_other_proc_done)
 
                     precompile_done = true
-                    @info "Peer process completed precompile" testprocess_id
+                    @debug "Peer process completed precompile" testprocess_id
                     if !is_precompile_process && jl_process !== nothing
                         @async try
                             JSONRPC.send(
@@ -382,11 +382,11 @@ function create_testprocess(
                 set_state!(:configuring_test_run; reason=:testprocess_activated)
 
                 if env.mode == "Debug"
-                    @info "Requesting debugger attachment" testprocess_id debug_pipe_name
+                    @debug "Requesting debugger attachment" testprocess_id debug_pipe_name
                     put!(testrun_channel, (source=:testprocess, msg=(;event=:attach_debugger, debug_pipe_name=debug_pipe_name)))
                 end
 
-                @info "Configuring test run on process" testprocess_id mode=env.mode setup_count=length(test_setups)
+                @debug "Configuring test run on process" testprocess_id mode=env.mode setup_count=length(test_setups)
                 @async try
                     JSONRPC.send(
                         endpoint,
@@ -407,7 +407,7 @@ function create_testprocess(
             elseif msg.event == :testprocess_testsetups_loaded
                 state == :configuring_test_run || error("Invalid state transition from $state.")
                 set_state!(:ready_to_run_tests; reason=:testprocess_testsetups_loaded)
-                @info "Process is ready to run test items" testprocess_id
+                @info "Process is ready to run test items"
                 put!(
                     testrun_channel,
                     (
@@ -427,7 +427,7 @@ function create_testprocess(
                     queued_tests_n = length(testitems_to_run_when_ready)
                     empty!(finished_testitems)
 
-                    @info "Running buffered test items" testprocess_id queued_tests_n
+                    @debug "Running buffered test items" testprocess_id queued_tests_n
 
                     put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Running"))
                     @async try
@@ -467,7 +467,7 @@ function create_testprocess(
                     queued_tests_n = length(msg.testitems)
                     empty!(finished_testitems)
 
-                    @info "Running assigned test items" testprocess_id queued_tests_n
+                    @debug "Running assigned test items" testprocess_id queued_tests_n
 
                     put!(controller_msg_channel, (event=:test_process_status_changed, id=testprocess_id, status="Running"))
                     @async try
@@ -498,13 +498,13 @@ function create_testprocess(
                         try put!(msg_channel, (;event=:kill_and_restart)) catch end
                     end
                 elseif state == :testprocess_starting
-                    @info "Buffering test items until process is ready" testprocess_id buffered=length(msg.testitems)
+                    @debug "Buffering test items until process is ready" testprocess_id buffered=length(msg.testitems)
                     testitems_to_run_when_ready = msg.testitems
                 else
                     error("Invalid state transition from $state on $testprocess_id.")
                 end
             elseif msg.event == :steal
-                @info "Sending steal request to test server" testprocess_id count=length(msg.testitem_ids)
+                @debug "Sending steal request to test server" testprocess_id count=length(msg.testitem_ids)
                 @async try
                     JSONRPC.send(
                             endpoint,
@@ -518,7 +518,7 @@ function create_testprocess(
                 end
             elseif msg.event == :testitem_started
                 if testrun_channel !== nothing
-                    @info "Forwarding started notification" testprocess_id testitem_id=msg.testitem_id
+                    @debug "Forwarding started notification" testprocess_id testitem_id=msg.testitem_id
                     put!(
                         testrun_channel,
                         (
@@ -533,16 +533,16 @@ function create_testprocess(
             elseif msg.event in (:testitem_passed, :testitem_failed, :testitem_errored, :testitem_skipped_stolen)
                 if state != :running_tests
                     # Stale result from a killed process after cancellation — ignore
-                    @info "Ignoring stale terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
+                    @debug "Ignoring stale terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
                     continue
                 end
 
                 if msg.testitem_id in finished_testitems
-                    @info "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
+                    @debug "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
                     # Duplicate result from steal race — skip forwarding
                 else
                     push!(finished_testitems, msg.testitem_id)
-                    @info "Forwarding terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id finished=length(finished_testitems) queued_tests_n
+                    @debug "Forwarding terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id finished=length(finished_testitems) queued_tests_n
 
                     if queued_tests_n == length(finished_testitems)
                         set_state!(:testrun_idle; reason=:batch_completed)
@@ -609,7 +609,7 @@ function create_testprocess(
             elseif msg.event == :append_output
                 # TODO Remove this and understand the race situation better
                 if testrun_channel !== nothing
-                    @info "Forwarding append_output notification" testprocess_id testitem_id=msg.testitem_id ncodeunits=ncodeunits(msg.output)
+                    @debug "Forwarding append_output notification" testprocess_id testitem_id=msg.testitem_id ncodeunits=ncodeunits(msg.output)
                     put!(
                         testrun_channel,
                         (
@@ -626,7 +626,7 @@ function create_testprocess(
             elseif msg.event == :kill_and_restart
                 if state == :idle
                     # Stale message from a previous async operation — ignore
-                    @info "Ignoring stale kill_and_restart" testprocess_id
+                    @debug "Ignoring stale kill_and_restart" testprocess_id
                     continue
                 end
                 @warn "Async operation failed, restarting test process" testprocess_id state
@@ -700,7 +700,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
     error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
     crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-    @info "Launching Julia test server process" testprocess_id julia_cmd=env.juliaCmd julia_args=env.juliaArgs mode=env.mode pipe_name debug_pipe_name
+    @info "Launching Julia test server process"
     jl_process = open(
         pipeline(
             Cmd(`$(env.juliaCmd) $(env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`, detach=false, env=jlEnv),
@@ -792,7 +792,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
             output_for_test_proc_as_string = String(take!(output_for_test_proc))
 
             if length(output_for_test_proc_as_string) > 0
-                @info "Forwarding process output chunk" testprocess_id ncodeunits=ncodeunits(output_for_test_proc_as_string)
+                @debug "Forwarding process output chunk" testprocess_id ncodeunits=ncodeunits(output_for_test_proc_as_string)
                 put!(
                     controller_msg_channel,
                     (
@@ -807,7 +807,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 output_for_ti_as_string = String(take!(v))
 
                 if length(output_for_ti_as_string) > 0
-                    @info "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) ncodeunits=ncodeunits(output_for_ti_as_string)
+                    @debug "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) ncodeunits=ncodeunits(output_for_ti_as_string)
                     put!(
                         testprocess_msg_channel,
                         (
@@ -825,13 +825,13 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
 
     @info "Waiting for connection from test process"
     socket = Sockets.accept(server)
-    @info "Connection established" testprocess_id
+    @info "Connection established"
 
     endpoint = JSONRPC.JSONRPCEndpoint(socket, socket)
 
     run(endpoint)
 
-    @info "Notifying state machine that process launched" testprocess_id
+    @debug "Notifying state machine that process launched" testprocess_id
     put!(testprocess_msg_channel, (event=:testprocess_launched, jl_process=jl_process, endpoint=endpoint))
 
     while true
@@ -844,7 +844,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 rethrow(err)
             end
         end
-        @info "Dispatching message from test server" testprocess_id method=get(msg, :method, missing)
+        @debug "Dispatching message from test server" testprocess_id method=get(msg, :method, missing)
 
         dispatch_testprocess_msg(endpoint, msg, testprocess_msg_channel)
     end
