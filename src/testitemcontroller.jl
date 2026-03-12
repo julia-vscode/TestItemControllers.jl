@@ -450,6 +450,11 @@ function execute_testrun(
             )
         end
 
+        if isempty(valid_test_items)
+            @info "No valid test items to run, exiting test run early" testrun_id
+            return missing
+        end
+
         set_state!(:procs_requested; reason=:requested_processes)
 
         @info "Requesting processes from controller" testrun_id requested=Dict(k.package_name=>length(v) for (k,v) in testitem_ids_by_env_chunked)
