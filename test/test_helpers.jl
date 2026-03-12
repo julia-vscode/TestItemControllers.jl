@@ -39,11 +39,12 @@
 
             for ts in td.testsetups
                 env = get_test_env(jw, ts.uri)
+                env.package_uri === nothing && continue
                 tf = get_text_file(jw, ts.uri)
                 pos = position_at(tf.content, first(ts.range))
 
                 push!(setups, TestSetupDetail(
-                    env.package_uri === nothing ? nothing : string(env.package_uri),
+                    string(env.package_uri),
                     string(ts.name),
                     string(ts.kind),
                     string(ts.uri),

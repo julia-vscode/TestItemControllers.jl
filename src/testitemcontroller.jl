@@ -327,7 +327,7 @@ struct TestItemDetail
 end
 
 struct TestSetupDetail
-    package_uri::Union{Nothing,String}
+    package_uri::String
     name::String
     kind::String
     uri::String
@@ -469,7 +469,7 @@ function execute_testrun(
                 env_content_hash_by_env = env_content_hash_by_env,
                 test_setups = [
                     TestItemServerProtocol.TestsetupDetails(
-                        packageUri = something(i.package_uri, missing),
+                        packageUri = i.package_uri,
                         name = i.name,
                         kind = i.kind,
                         uri = i.uri,

@@ -34,7 +34,7 @@ end
 end
 
 @dict_readable struct TestSetupDetail <: JSONRPC.Outbound
-    packageUri::Union{Missing,String}
+    packageUri::String
     name::String
     kind::String
     uri::String

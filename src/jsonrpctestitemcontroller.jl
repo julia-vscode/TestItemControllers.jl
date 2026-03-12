@@ -60,7 +60,7 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
         ],
         [
             TestSetupDetail(
-                coalesce(i.packageUri, nothing),
+                i.packageUri,
                 i.name,
                 i.kind,
                 i.uri,
