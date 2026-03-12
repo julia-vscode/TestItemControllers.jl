@@ -1,5 +1,7 @@
 module BasicPackage
 
+export greet, add, buggy_func
+
 greet() = "Hello from BasicPackage!"
 
 add(a, b) = a + b
