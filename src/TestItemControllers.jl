@@ -20,6 +20,7 @@ end
 export JSONRPCTestItemController
 export TestItemController
 export shutdown
+export terminate_test_process
 
 include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
