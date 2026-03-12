@@ -72,6 +72,7 @@ end
 
 @dict_readable struct ConfigureTestRunRequestParams <: JSONRPC.Outbound
     mode::String
+    logLevel::String
     coverageRootUris::Union{Missing,Vector{String}}
     testSetups::Union{Missing,Vector{TestsetupDetails}}
 end

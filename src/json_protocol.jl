@@ -4,7 +4,7 @@ import ..JSONRPC
 
 using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
 
-@dict_readable struct TestProfile
+@dict_readable struct TestProfile <: JSONRPC.Outbound
     id::String
     label::String
     juliaCmd::String
@@ -16,7 +16,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     coverageRootUris::Union{Missing,Vector{String}}
 end
 
-@dict_readable struct TestItemDetail
+@dict_readable struct TestItemDetail <: JSONRPC.Outbound
     id::String
     uri::String
     label::String
@@ -33,7 +33,7 @@ end
     codeColumn::Int
 end
 
-@dict_readable struct TestSetupDetail
+@dict_readable struct TestSetupDetail <: JSONRPC.Outbound
     packageUri::Union{Missing,String}
     name::String
     kind::String
@@ -43,17 +43,19 @@ end
     code::String
 end
 
-@dict_readable struct CreateTestRunParams
+@dict_readable struct CreateTestRunParams <: JSONRPC.Outbound
     testRunId::String
     testProfiles::Vector{TestProfile}
     testItems::Vector{TestItemDetail}
     testSetups::Vector{TestSetupDetail}
 end
 
-@dict_readable struct FileCoverage <: JSONRPC.Outbound
+struct FileCoverage <: JSONRPC.Outbound
     uri::String
     coverage::Vector{Union{Int,Nothing}}
 end
+FileCoverage(; uri, coverage) = FileCoverage(uri, coverage)
+FileCoverage(d::Dict) = FileCoverage(d["uri"], Union{Int,Nothing}[i for i in d["coverage"]])
 
 @dict_readable struct CreateTestRunResponse <: JSONRPC.Outbound
     status::String
@@ -68,7 +70,7 @@ end
 
 const terminate_test_process_request_type = RequestType("terminateTestProcess", TerminateTestProcessParams, Nothing)
 
-@dict_readable struct TestMessage
+@dict_readable struct TestMessage <: JSONRPC.Outbound
     message::String
     expectedOutput::Union{Missing,String}
     actualOutput::Union{Missing,String}

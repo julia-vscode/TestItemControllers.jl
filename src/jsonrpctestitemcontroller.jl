@@ -21,6 +21,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
 end
 
 function create_testrun_request(params::TestItemControllerProtocol.CreateTestRunParams, jr_controller::JSONRPCTestItemController, token)
+    @debug "Received create_testrun request" testrun_id=params.testRunId profile_count=length(params.testProfiles) testitem_count=length(params.testItems) testsetup_count=length(params.testSetups)
     ret =  execute_testrun(
         jr_controller.controller,
         params.testRunId,
@@ -34,7 +35,8 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.juliaEnv,
                 i.maxProcessCount,
                 i.mode,
-                coalesce(i.coverageRootUris,nothing)
+                coalesce(i.coverageRootUris,nothing),
+                jr_controller.controller.log_level
             ) for i in params.testProfiles
         ],
         [
@@ -136,10 +138,12 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
         token
     )
 
+    @debug "Finished create_testrun request" testrun_id=params.testRunId coverage_files=ismissing(ret) ? missing : length(ret)
     return TestItemControllerProtocol.CreateTestRunResponse("success", ret)
 end
 
 function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, json_controller::JSONRPCTestItemController, token)
+    @debug "Received terminate_test_process request" id=params.testProcessId
     terminate_test_process(json_controller.controller, params.testProcessId)
 end
 
@@ -149,13 +153,16 @@ JSONRPC.@message_dispatcher dispatch_msg begin
 end
 
 function Base.run(jr_controller::JSONRPCTestItemController)
+    @debug "Starting JSON-RPC controller endpoint"
     run(jr_controller.endpoint)
 
     @async try
         while true
             msg = JSONRPC.get_next_message(jr_controller.endpoint)
+            @debug "Received JSON-RPC message" method=msg.method
 
             @async try
+                @debug "Dispatching JSON-RPC message asynchronously" method=msg.method
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
                 bt = catch_backtrace()
@@ -177,32 +184,44 @@ function Base.run(jr_controller::JSONRPCTestItemController)
 
     run(
         jr_controller.controller,
-        (id, package_name, package_uri, project_uri, coverage, env) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notificationTypeTestProcessCreated,
-            TestItemControllerProtocol.TestProcessCreatedParams(
-                id = id,
-                packageName = package_name,
-                packageUri = something(package_uri, missing),
-                projectUri = something(project_uri, missing),
-                coverage = coverage,
-                env = env
+        (id, package_name, package_uri, project_uri, coverage, env) -> begin
+            @debug "Forwarding test process created notification" id package_name coverage
+            JSONRPC.send(
+                jr_controller.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessCreated,
+                TestItemControllerProtocol.TestProcessCreatedParams(
+                    id = id,
+                    packageName = package_name,
+                    packageUri = something(package_uri, missing),
+                    projectUri = something(project_uri, missing),
+                    coverage = coverage,
+                    env = env
+                )
             )
-        ),
-        id -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notificationTypeTestProcessTerminated,
-            (;id = id)
-        ),
-        (id, status) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notificationTypeTestProcessStatusChanged,
-            TestItemControllerProtocol.TestProcessStatusChangedParams(id = id, status = status)
-        ),
-        (id, output) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notificationTypeTestProcessOutput,
-            TestItemControllerProtocol.TestProcessOutputParams(id = id, output = output)
-        )
+        end,
+        id -> begin
+            @debug "Forwarding test process terminated notification" id
+            JSONRPC.send(
+                jr_controller.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessTerminated,
+                (;id = id)
+            )
+        end,
+        (id, status) -> begin
+            @debug "Forwarding test process status notification" id status
+            JSONRPC.send(
+                jr_controller.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessStatusChanged,
+                TestItemControllerProtocol.TestProcessStatusChangedParams(id = id, status = status)
+            )
+        end,
+        (id, output) -> begin
+            @debug "Forwarding test process output notification" id ncodeunits=ncodeunits(output)
+            JSONRPC.send(
+                jr_controller.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessOutput,
+                TestItemControllerProtocol.TestProcessOutputParams(id = id, output = output)
+            )
+        end
     )
 end

@@ -1,5 +1,5 @@
 @testitem "TestItemController run and shutdown" begin
-    tic = TestItemController()
+    tic = TestItemController(log_level=:Debug)
 
     finished = Channel(1)
 

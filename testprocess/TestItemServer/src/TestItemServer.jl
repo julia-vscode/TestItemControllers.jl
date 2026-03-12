@@ -5,6 +5,7 @@ include("pkg_imports.jl")
 import .JSONRPC: @dict_readable
 import .CoverageTools: LCOV, amend_coverage_from_src!
 import Test, Pkg, Sockets
+import Logging
 
 include("../../../shared/testserver_protocol.jl")
 include("helper.jl")
@@ -27,6 +28,7 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
     test_setups::Dict{Tuple{String,Symbol},Testsetup}
     mode::String
     coverage_root_uris::Union{Nothing,Vector{String}}
+    log_level::Base.CoreLogging.LogLevel
 
     testitems_channel::Channel{Vector{TestItemServerProtocol.RunTestItem}}
     stolen_testitem_ids_channel::Channel{Vector{String}}
@@ -38,6 +40,7 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
             Dict{Tuple{String,Symbol},Testsetup}(),
             "",
             nothing,
+            Logging.Info,
             Channel{Vector{TestItemServerProtocol.RunTestItem}}(Inf),
             Channel{Vector{String}}(Inf)
         )
@@ -185,7 +188,9 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             t0 = time_ns()
             try
                 withpath(filepath) do
-                    Base.invokelatest(include_string, mod, code, filepath)
+                    Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                        Base.invokelatest(include_string, mod, code, filepath)
+                    end
                 end
                 setup_details.evaled = true
             catch err
@@ -298,7 +303,9 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                     else
                         mode == "Coverage" && clear_coverage_data()
                         try
-                            Base.invokelatest(include_string, mod, testsnippet_code, testsnippet_filepath)
+                            Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                                Base.invokelatest(include_string, mod, testsnippet_code, testsnippet_filepath)
+                            end
                         finally
                             mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
                         end
@@ -347,7 +354,9 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 else
                     mode == "Coverage" && clear_coverage_data()
                     try
-                        Base.invokelatest(include_string, mod, code, filepath)
+                        Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                            Base.invokelatest(include_string, mod, code, filepath)
+                        end
                     finally
                         mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
                     end
@@ -576,8 +585,17 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
     return nothing
 end
 
+function parse_log_level(s::Symbol)::Base.CoreLogging.LogLevel
+    s === :Debug && return Logging.Debug
+    s === :Info  && return Logging.Info
+    s === :Warn  && return Logging.Warn
+    s === :Error && return Logging.Error
+    return Logging.Info
+end
+
 function configure_test_run_request(params::TestItemServerProtocol.ConfigureTestRunRequestParams, state::TestProcessState, token)
     state.mode = params.mode
+    state.log_level = parse_log_level(Symbol(params.logLevel))
     state.coverage_root_uris = coalesce(params.coverageRootUris, nothing)
 
     setups_to_remove = setdiff(keys(state.test_setups), map(i->(i.packageUri,Symbol(i.name)), params.testSetups))
