@@ -425,7 +425,7 @@ function execute_testrun(
         for (k,v) in pairs(testitem_ids_by_env)
             as_share = length(v)/length(valid_test_items)
 
-            n_procs = min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items))
+            n_procs = max(1, min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items)))
 
             chunks =  makechunks(v, n_procs)
 
@@ -453,7 +453,7 @@ function execute_testrun(
         end
 
         if isempty(valid_test_items)
-            @info "No valid test items to run, exiting test run early"
+            @warn "No valid test items to run" total_items=length(test_items) items_without_package=length(test_items_without_package)
             return missing
         end
 
