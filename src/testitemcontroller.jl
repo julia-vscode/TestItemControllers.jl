@@ -371,14 +371,12 @@ function execute_testrun(
         testrun_msg_queue = Channel{Any}(Inf)
         our_procs = nothing
 
+        testrun_cancel_registration = nothing
         if token !== nothing
-            @debug "Starting test run cancellation watcher" testrun_id
-            @async try
-                wait(token)
+            @debug "Registering test run cancellation callback" testrun_id
+            testrun_cancel_registration = CancellationTokens.register(token) do
                 @debug "Cancellation token fired for test run" testrun_id
                 try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
-            catch err
-                @error "Error in testrun cancellation watcher" testrun_id exception=(err, catch_backtrace())
             end
         end
 
@@ -497,6 +495,8 @@ function execute_testrun(
 
         processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
 
+        cancelled = false
+
         while true
             msg = take!(testrun_msg_queue)
             @debug "Msg $(msg.source):$(msg.msg.event)" msg
@@ -505,6 +505,17 @@ function execute_testrun(
                 if msg.msg.event==:procs_acquired
                     state == :procs_requested || error("Invalid state transition from $state")
                     our_procs = msg.msg.procs
+
+                    if cancelled
+                        # Cancellation arrived before process acquisition completed.
+                        # Return all processes to pool immediately.
+                        @info "Returning $(sum(length, values(our_procs), init=0)) process(es) to pool after deferred cancellation"
+                        for proc in Iterators.flatten(values(our_procs))
+                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
+                        end
+                        break
+                    end
+
                     @info "Acquired $(sum(length, values(our_procs), init=0)) test process(es) for test run"
 
                     # Now distribute test items over test processes
@@ -526,6 +537,12 @@ function execute_testrun(
                     error("Unknown message")
                 end
             elseif msg.source==:testprocess
+                if cancelled
+                    # Ignore stale process messages after cancellation
+                    @debug "Ignoring stale testprocess message after cancellation" testrun_id event=msg.msg.event
+                    continue
+                end
+
                 if msg.msg.event == :ready_to_run_testitems
                     state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
 
@@ -820,9 +837,13 @@ function execute_testrun(
                             @debug "Returning process to pool after cancellation" testrun_id process_id=proc.id
                             put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
                         end
+                        break
+                    else
+                        # Processes not yet acquired — defer pool return until :procs_acquired arrives
+                        @debug "Cancellation before process acquisition, deferring cleanup" testrun_id
+                        cancelled = true
+                        continue
                     end
-
-                    break
                 else
                     error("Unknown message")
                 end
@@ -832,6 +853,9 @@ function execute_testrun(
         end
 
         @debug "Leaving test run event loop" testrun_id state remaining=length(valid_test_items)
+        if testrun_cancel_registration !== nothing
+            try close(testrun_cancel_registration) catch end
+        end
         return coverage_results
         end
 end

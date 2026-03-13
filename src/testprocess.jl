@@ -78,7 +78,7 @@ function create_testprocess(
         queued_tests_n = 0
         finished_testitems = Set{String}()
         testitems_to_run_when_ready = nothing
-        testrun_watcher_task = nothing
+        testrun_watcher_registration = nothing
 
         state = :created
         function set_state!(new_state::Symbol; reason=nothing)
@@ -91,6 +91,17 @@ function create_testprocess(
         while true
             msg = take!(msg_channel)
             @debug "Msg $(msg.event)" msg queued_tests_n length(finished_testitems)
+
+            # Absorber: in :cancelled state, ignore all messages except lifecycle events.
+            # This safely drains stale messages from killed async operations.
+            if state == :cancelled && msg.event ∉ (:end_testrun, :terminate, :shutdown)
+                if msg.event == :testprocess_launched
+                    # Kill the stale process that connected after cancellation
+                    try kill(msg.jl_process) catch end
+                end
+                @debug "Ignoring message in cancelled state" testprocess_id event=msg.event
+                continue
+            end
 
             if msg.event == :shutdown
                 @debug "Sending shutdown request to active endpoint" testprocess_id state has_endpoint=endpoint !== nothing
@@ -130,14 +141,9 @@ function create_testprocess(
 
                 @debug "Registered test run on process" testprocess_id has_token=testrun_token !== nothing setup_count=length(test_setups) coverage_root_uris_count=coverage_root_uris === nothing ? 0 : length(coverage_root_uris)
 
-                testrun_watcher_task = @async try
-                    @debug "Waiting for test run cancellation on process" testprocess_id
-                    wait(testrun_token)
+                testrun_watcher_registration = CancellationTokens.register(testrun_token) do
                     @debug "Process cancellation watcher fired" testprocess_id
                     try put!(msg_channel, (;event=:cancel_test_run)) catch end
-                catch err
-                    (err isa InterruptException || err isa Base.InvalidStateException) && return  # interrupted during cleanup
-                    @error "Error in testrun cancellation watcher" testprocess_id exception=(err, catch_backtrace())
                 end
             elseif msg.event == :cancel_test_run
                 if state == :idle
@@ -169,13 +175,11 @@ function create_testprocess(
                         catch err
                             @error "Error in shutdown sender" testprocess_id exception=(err, catch_backtrace())
                         end
-                        @async try
-                            wait(CancellationTokens.get_token(shutdown_timeout))
+                        shutdown_timeout_reg = CancellationTokens.register(CancellationTokens.get_token(shutdown_timeout)) do
                             try put!(shutdown_done, false) catch end
-                        catch err
-                            @error "Error in shutdown timeout watcher" testprocess_id exception=(err, catch_backtrace())
                         end
                         graceful = take!(shutdown_done)
+                        close(shutdown_timeout_reg)
                         if !graceful && process_running(saved_process)
                             kill(saved_process)
                         end
@@ -197,9 +201,12 @@ function create_testprocess(
                 empty!(finished_testitems)
                 testitems_to_run_when_ready = nothing
 
-                set_state!(:testrun_killed_after_revise_fail; reason=:cancel_test_run)
-                @debug "Queueing process restart after cancellation" testprocess_id
-                put!(msg_channel, (;event = :start))
+                if testrun_watcher_registration !== nothing
+                    try close(testrun_watcher_registration) catch end
+                    testrun_watcher_registration = nothing
+                end
+
+                set_state!(:cancelled; reason=:cancel_test_run)
             elseif msg.event == :revise
                 state == :testrun_idle || error("Invalid state transition")
 
@@ -298,9 +305,9 @@ function create_testprocess(
                     # Process is restarting (e.g. after cancellation) — clear testrun
                     # vars but keep state so :testprocess_launched can finish and
                     # transition to :idle via the testrun_channel===nothing path.
-                    if testrun_watcher_task !== nothing
-                        try schedule(testrun_watcher_task, InterruptException(); error=true) catch end
-                        testrun_watcher_task = nothing
+                    if testrun_watcher_registration !== nothing
+                        try close(testrun_watcher_registration) catch end
+                        testrun_watcher_registration = nothing
                     end
                     testrun_channel = nothing
                     testrun_token = nothing
@@ -309,13 +316,13 @@ function create_testprocess(
                     @debug "Cleared test run metadata while process is still starting" testprocess_id
                     continue
                 end
-                state in (:testrun_idle, :testrun_killed_after_revise_fail) || error("Invalid state transition from $state")
+                state in (:testrun_idle, :testrun_killed_after_revise_fail, :cancelled) || error("Invalid state transition from $state")
                 set_state!(:idle; reason=:end_testrun)
 
-                # Interrupt the cancellation watcher so it doesn't leak
-                if testrun_watcher_task !== nothing
-                    try schedule(testrun_watcher_task, InterruptException(); error=true) catch end
-                    testrun_watcher_task = nothing
+                # Deregister the cancellation callback so it doesn't fire after testrun ends
+                if testrun_watcher_registration !== nothing
+                    try close(testrun_watcher_registration) catch end
+                    testrun_watcher_registration = nothing
                 end
 
                 testrun_channel = nothing
@@ -686,6 +693,11 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
+    # Close the server socket if cancellation fires, unblocking Sockets.accept
+    server_cancel_reg = CancellationTokens.register(token) do
+        try close(server) catch end
+    end
+
     testserver_script = joinpath(@__DIR__, "../testprocess/app/testserver_main.jl")
 
     pipe_out = Pipe()
@@ -844,7 +856,14 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
     end
 
     @info "Waiting for connection from test process"
-    socket = Sockets.accept(server)
+    local socket
+    try
+        socket = Sockets.accept(server)
+    catch err
+        close(server_cancel_reg)
+        rethrow(err)
+    end
+    close(server_cancel_reg)
     @info "Connection established"
 
     endpoint = JSONRPC.JSONRPCEndpoint(socket, socket)
