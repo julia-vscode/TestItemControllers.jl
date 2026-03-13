@@ -319,6 +319,9 @@ function create_testprocess(
                 state in (:testrun_idle, :testrun_killed_after_revise_fail, :cancelled) || error("Invalid state transition from $state")
                 set_state!(:idle; reason=:end_testrun)
 
+                queued_tests_n = 0
+                empty!(finished_testitems)
+
                 # Deregister the cancellation callback so it doesn't fire after testrun ends
                 if testrun_watcher_registration !== nothing
                     try close(testrun_watcher_registration) catch end
@@ -467,14 +470,14 @@ function create_testprocess(
                 end
             elseif msg.event == :run_testitems
                 if state in (:ready_to_run_tests, :testrun_idle, :running_tests)
-                    set_state!(:running_tests; reason=:run_testitems)
-
                     if state == :ready_to_run_tests
                         queued_tests_n = length(msg.testitems)
                         empty!(finished_testitems)
                     else
                         queued_tests_n += length(msg.testitems)
                     end
+
+                    set_state!(:running_tests; reason=:run_testitems)
 
                     @debug "Running assigned test items" testprocess_id queued_tests_n
 
