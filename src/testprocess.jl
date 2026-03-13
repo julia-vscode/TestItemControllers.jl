@@ -531,22 +531,34 @@ function create_testprocess(
                     )
                 end
             elseif msg.event in (:testitem_passed, :testitem_failed, :testitem_errored, :testitem_skipped_stolen)
-                if state != :running_tests
+                if state == :testrun_idle && testrun_channel !== nothing
+                    # Late result arriving after batch completed (e.g. stolen item confirmation)
+                    # Forward to testrun_channel without batch accounting
+                    if !(msg.testitem_id in finished_testitems)
+                        push!(finished_testitems, msg.testitem_id)
+                        @debug "Forwarding late terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
+                    else
+                        @debug "Ignoring duplicate late terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
+                        continue
+                    end
+                elseif state != :running_tests
                     # Stale result from a killed process after cancellation — ignore
                     @debug "Ignoring stale terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
                     continue
-                end
-
-                if msg.testitem_id in finished_testitems
-                    @debug "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
-                    # Duplicate result from steal race — skip forwarding
                 else
+                    if msg.testitem_id in finished_testitems
+                        @debug "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
+                        # Duplicate result from steal race — skip forwarding
+                        continue
+                    end
+
                     push!(finished_testitems, msg.testitem_id)
                     @debug "Forwarding terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id finished=length(finished_testitems) queued_tests_n
 
                     if queued_tests_n == length(finished_testitems)
                         set_state!(:testrun_idle; reason=:batch_completed)
                     end
+                end
 
                     if msg.event == :testitem_passed
                         put!(
@@ -605,7 +617,6 @@ function create_testprocess(
                     else
                         error("Unknown message")
                     end
-                end
             elseif msg.event == :append_output
                 # TODO Remove this and understand the race situation better
                 if testrun_channel !== nothing
@@ -844,7 +855,7 @@ function start(testprocess_id, controller_msg_channel, testprocess_msg_channel, 
                 rethrow(err)
             end
         end
-        @debug "Dispatching message from test server" testprocess_id method=get(msg, :method, missing)
+        @debug "Dispatching message from test server" testprocess_id method=msg.method
 
         dispatch_testprocess_msg(endpoint, msg, testprocess_msg_channel)
     end
