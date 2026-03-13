@@ -423,7 +423,6 @@ function create_testprocess(
                 if testitems_to_run_when_ready!==nothing
                     set_state!(:running_tests; reason=:draining_buffered_testitems)
 
-                    queued_tests_n == length(finished_testitems) || error("HA, $queued_tests_n")
                     queued_tests_n = length(testitems_to_run_when_ready)
                     empty!(finished_testitems)
 
@@ -463,7 +462,6 @@ function create_testprocess(
                 if state in (:ready_to_run_tests, :testrun_idle, :running_tests)
                     set_state!(:running_tests; reason=:run_testitems)
 
-                    queued_tests_n == length(finished_testitems) || error("HA, $queued_tests_n")
                     queued_tests_n = length(msg.testitems)
                     empty!(finished_testitems)
 
@@ -668,6 +666,17 @@ function create_testprocess(
         end
     catch err
         @error "Fatal error in test process event loop" testprocess_id exception=(err, catch_backtrace())
+        if jl_process !== nothing
+            try CancellationTokens.cancel(julia_proc_cs) catch end
+            try kill(jl_process) catch end
+            jl_process = nothing
+            endpoint = nothing
+            julia_proc_cs = nothing
+        end
+        if testrun_channel !== nothing && isopen(testrun_channel)
+            put!(testrun_channel, (source=:testprocess, msg=(event=:test_process_terminated, id=testprocess_id)))
+        end
+        put!(controller_msg_channel, (event=:test_process_terminated, id=testprocess_id))
     end
 
     return testprocess_id, msg_channel
