@@ -316,7 +316,7 @@ function create_testprocess(
                     @debug "Cleared test run metadata while process is still starting" testprocess_id
                     continue
                 end
-                state in (:testrun_idle, :testrun_killed_after_revise_fail, :cancelled) || error("Invalid state transition from $state")
+                state in (:testrun_idle, :testrun_killed_after_revise_fail, :cancelled, :running_tests) || error("Invalid state transition from $state")
                 set_state!(:idle; reason=:end_testrun)
 
                 queued_tests_n = 0

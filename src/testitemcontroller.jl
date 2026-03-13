@@ -612,16 +612,6 @@ function execute_testrun(
                                 deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
                             end
 
-                            # Defense-in-depth: clean up ALL processes' stolen tracking
-                            # for this item. An item may have been re-stolen through
-                            # multiple processes, so we must scan all of them.
-                            for (proc_id, stolen_ids) in pairs(stolen_testitem_ids_by_proc_id)
-                                idx = findfirst(isequal(msg.msg.testitemid), stolen_ids)
-                                if idx !== nothing
-                                    deleteat!(stolen_ids, idx)
-                                end
-                            end
-
                             if msg.msg.event == :passed
                                 testitem_passed_callback(
                                     testrun_id,
@@ -672,15 +662,6 @@ function execute_testrun(
                             proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
                             if proc_idx !== nothing
                                 deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
-                            end
-
-                            # Defense-in-depth: also clean stolen tracking for this
-                            # item across all processes (handles re-steal chains).
-                            for (proc_id, stolen_ids) in pairs(stolen_testitem_ids_by_proc_id)
-                                idx = findfirst(isequal(msg.msg.testitemid), stolen_ids)
-                                if idx !== nothing
-                                    deleteat!(stolen_ids, idx)
-                                end
                             end
                         end
                     end
