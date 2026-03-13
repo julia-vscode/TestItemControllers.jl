@@ -32,6 +32,7 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
 
     testitems_channel::Channel{Vector{TestItemServerProtocol.RunTestItem}}
     stolen_testitem_ids_channel::Channel{Vector{String}}
+    wakeup_channel::Channel{Nothing}
 
     function TestProcessState(endpoint::JSONRPC.JSONRPCEndpoint, err_handler::ERR_HANDLER = nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
         return new{ERR_HANDLER}(
@@ -42,7 +43,8 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
             nothing,
             Logging.Info,
             Channel{Vector{TestItemServerProtocol.RunTestItem}}(Inf),
-            Channel{Vector{String}}(Inf)
+            Channel{Vector{String}}(Inf),
+            Channel{Nothing}(Inf)
         )
     end
 end
@@ -457,7 +459,7 @@ end
 
 function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItemsRequestParams, state::TestProcessState, token)
     put!(state.testitems_channel, params.testItems)
-
+    put!(state.wakeup_channel, nothing)
 
     return nothing
 end
@@ -634,6 +636,7 @@ end
 
 function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState, token)
     put!(state.stolen_testitem_ids_channel, params.testItemIds)
+    put!(state.wakeup_channel, nothing)
 
     return nothing
 end
@@ -714,7 +717,7 @@ function runner_loop(state::TestProcessState)
         end
 
         if length(testitems)==0 && length(stolen_testitem_ids)==0
-            fetch(state.testitems_channel)
+            take!(state.wakeup_channel)
         end
     end
 end
