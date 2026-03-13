@@ -549,6 +549,9 @@ function create_testprocess(
                     if !(msg.testitem_id in finished_testitems)
                         push!(finished_testitems, msg.testitem_id)
                         @debug "Forwarding late terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
+                    elseif msg.event == :testitem_skipped_stolen
+                        # Always forward stolen confirmations so the controller can clear pending stolen tracking
+                        @debug "Forwarding duplicate skipped_stolen late result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
                     else
                         @debug "Ignoring duplicate late terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id state
                         continue
@@ -559,16 +562,21 @@ function create_testprocess(
                     continue
                 else
                     if msg.testitem_id in finished_testitems
-                        @debug "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
-                        # Duplicate result from steal race — skip forwarding
-                        continue
-                    end
+                        if msg.event == :testitem_skipped_stolen
+                            # Always forward stolen confirmations so the controller can clear pending stolen tracking
+                            @debug "Forwarding duplicate skipped_stolen result" testprocess_id event=msg.event testitem_id=msg.testitem_id
+                        else
+                            @debug "Ignoring duplicate terminal result from test process" testprocess_id event=msg.event testitem_id=msg.testitem_id
+                            # Duplicate result from steal race — skip forwarding
+                            continue
+                        end
+                    else
+                        push!(finished_testitems, msg.testitem_id)
+                        @debug "Forwarding terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id finished=length(finished_testitems) queued_tests_n
 
-                    push!(finished_testitems, msg.testitem_id)
-                    @debug "Forwarding terminal result" testprocess_id event=msg.event testitem_id=msg.testitem_id finished=length(finished_testitems) queued_tests_n
-
-                    if queued_tests_n == length(finished_testitems)
-                        set_state!(:testrun_idle; reason=:batch_completed)
+                        if queued_tests_n == length(finished_testitems)
+                            set_state!(:testrun_idle; reason=:batch_completed)
+                        end
                     end
                 end
 

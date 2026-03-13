@@ -488,6 +488,8 @@ function execute_testrun(
 
         testitem_ids_by_proc = Dict{String,Vector{String}}()
 
+        items_dispatched_to_procs = Set{String}()
+
         coverage_results = missing
 
         local_coverage = CoverageTools.FileCoverage[]
@@ -531,6 +533,7 @@ function execute_testrun(
                     for i in processes_that_are_ready
                         @debug "Dispatching buffered test items to ready process" testrun_id process_id=i.id assigned=length(testitem_ids_by_proc[i.id])
                         put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
+                        push!(items_dispatched_to_procs, i.id)
                     end
                 else
                     error("Unknown message")
@@ -548,6 +551,7 @@ function execute_testrun(
                     if state == :all_procs_acquired
                         @info "Test process '$(msg.msg.id)' is ready, dispatching $(length(testitem_ids_by_proc[msg.msg.id])) test item(s)"
                         put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
+                        push!(items_dispatched_to_procs, msg.msg.id)
                     else
                         @info "Test process '$(msg.msg.id)' is ready, waiting for process acquisition to finish"
                         @debug "Process ready before acquisition finished, buffering" testrun_id process_id=msg.msg.id
@@ -716,14 +720,18 @@ function execute_testrun(
 
                             deleteat!(testitem_ids_from_which_we_steal, steal_range)
 
-                            for i in testitem_ids_to_steal
-                                push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
-                            end
-
                             append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
 
-                            @debug "Queueing steal redistribution" testrun_id from_process_id=test_process_to_steal_from.id to_process_id=test_process.id stolen=length(testitem_ids_to_steal)
-                            put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
+                            if test_process_to_steal_from.id in items_dispatched_to_procs
+                                for i in testitem_ids_to_steal
+                                    push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
+                                end
+
+                                @debug "Queueing steal redistribution" testrun_id from_process_id=test_process_to_steal_from.id to_process_id=test_process.id stolen=length(testitem_ids_to_steal)
+                                put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
+                            else
+                                @info "Victim process '$(test_process_to_steal_from.id)' not yet dispatched, reassigning items without steal tracking"
+                            end
 
                             put!(test_process.msg_channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_to_steal)))
                             # run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing, controller)
