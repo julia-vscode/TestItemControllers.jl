@@ -384,7 +384,6 @@ function execute_testrun(
         test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
 
         stolen_testitem_ids_by_proc_id = Dict{String,Vector{String}}()
-        stolen_item_to_victim = Dict{String,String}()
 
         testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
 
@@ -598,12 +597,10 @@ function execute_testrun(
                         if stolen_idx !== nothing
                             deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
                         end
-                        delete!(stolen_item_to_victim, msg.msg.testitemid)
                     else
                         if stolen_idx !== nothing
                             # Victim completed item before steal took effect — clean up stolen tracking
                             deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
-                            delete!(stolen_item_to_victim, msg.msg.testitemid)
                         end
 
                         if haskey(valid_test_items, msg.msg.testitemid)
@@ -615,16 +612,14 @@ function execute_testrun(
                                 deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
                             end
 
-                            # Defense-in-depth: if this item was stolen and the thief
-                            # reported the result, clean up the victim's stolen tracking
-                            # so we don't wait forever for a :skipped_stolen that may never come.
-                            if haskey(stolen_item_to_victim, msg.msg.testitemid)
-                                victim_id = stolen_item_to_victim[msg.msg.testitemid]
-                                victim_stolen_idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[victim_id])
-                                if victim_stolen_idx !== nothing
-                                    deleteat!(stolen_testitem_ids_by_proc_id[victim_id], victim_stolen_idx)
+                            # Defense-in-depth: clean up ALL processes' stolen tracking
+                            # for this item. An item may have been re-stolen through
+                            # multiple processes, so we must scan all of them.
+                            for (proc_id, stolen_ids) in pairs(stolen_testitem_ids_by_proc_id)
+                                idx = findfirst(isequal(msg.msg.testitemid), stolen_ids)
+                                if idx !== nothing
+                                    deleteat!(stolen_ids, idx)
                                 end
-                                delete!(stolen_item_to_victim, msg.msg.testitemid)
                             end
 
                             if msg.msg.event == :passed
@@ -677,6 +672,15 @@ function execute_testrun(
                             proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
                             if proc_idx !== nothing
                                 deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
+                            end
+
+                            # Defense-in-depth: also clean stolen tracking for this
+                            # item across all processes (handles re-steal chains).
+                            for (proc_id, stolen_ids) in pairs(stolen_testitem_ids_by_proc_id)
+                                idx = findfirst(isequal(msg.msg.testitemid), stolen_ids)
+                                if idx !== nothing
+                                    deleteat!(stolen_ids, idx)
+                                end
                             end
                         end
                     end
@@ -733,7 +737,6 @@ function execute_testrun(
 
                             for i in testitem_ids_to_steal
                                 push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
-                                stolen_item_to_victim[i] = test_process_to_steal_from.id
                             end
 
                             append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
@@ -782,9 +785,6 @@ function execute_testrun(
                         empty!(testitem_ids_by_proc[terminated_proc_id])
                     end
                     if haskey(stolen_testitem_ids_by_proc_id, terminated_proc_id)
-                        for item_id in stolen_testitem_ids_by_proc_id[terminated_proc_id]
-                            delete!(stolen_item_to_victim, item_id)
-                        end
                         empty!(stolen_testitem_ids_by_proc_id[terminated_proc_id])
                     end
 

@@ -469,8 +469,12 @@ function create_testprocess(
                 if state in (:ready_to_run_tests, :testrun_idle, :running_tests)
                     set_state!(:running_tests; reason=:run_testitems)
 
-                    queued_tests_n = length(msg.testitems)
-                    empty!(finished_testitems)
+                    if state == :ready_to_run_tests
+                        queued_tests_n = length(msg.testitems)
+                        empty!(finished_testitems)
+                    else
+                        queued_tests_n += length(msg.testitems)
+                    end
 
                     @debug "Running assigned test items" testprocess_id queued_tests_n
 
