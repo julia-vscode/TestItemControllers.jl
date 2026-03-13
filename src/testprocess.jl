@@ -475,6 +475,13 @@ function create_testprocess(
                         empty!(finished_testitems)
                     else
                         queued_tests_n += length(msg.testitems)
+                        # Remove incoming item IDs from finished_testitems so
+                        # re-stolen items (stolen away then stolen back) can
+                        # produce fresh results instead of being dropped as
+                        # duplicates of their earlier :skipped_stolen entry.
+                        for item in msg.testitems
+                            delete!(finished_testitems, item.id)
+                        end
                     end
 
                     set_state!(:running_tests; reason=:run_testitems)
