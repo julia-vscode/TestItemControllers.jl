@@ -1,17 +1,13 @@
-mutable struct TestProcess
-    id::String
-    msg_channel::Channel
-    idle::Bool
-    # killed::Bool
-    # status::Symbol
-end
-
 mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
     err_handler::ERR_HANDLER
+    callbacks::ControllerCallbacks
 
-    msg_channel::Channel
+    reactor_channel::Channel{ReactorMessage}
 
-    testprocesses::Dict{TestEnvironment,Vector{TestProcess}}
+    test_processes::Dict{String,TestProcessState}       # flat lookup by process ID
+    process_pool::Dict{TestEnvironment,Vector{String}}   # pool of process IDs by env
+    test_runs::Dict{String,TestRunState}
+
     testprocess_precompile_not_required::Set{
         @NamedTuple{
             julia_cmd::String,
@@ -27,8 +23,10 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
     crash_reporting_pipename::Union{Nothing,String}
 
     log_level::Symbol
+    controller_fsm::FSM{ControllerPhase}
 
     function TestItemController(
+        callbacks::ControllerCallbacks,
         err_handler::ERR_HANDLER=nothing;
         error_handler_file=nothing,
         crash_reporting_pipename=nothing,
@@ -36,305 +34,1424 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
 
         return new{ERR_HANDLER}(
             err_handler,
-            Channel(Inf),
-            Dict{TestEnvironment,Vector{TestProcess}}(),
+            callbacks,
+            Channel{ReactorMessage}(Inf),
+            Dict{String,TestProcessState}(),
+            Dict{TestEnvironment,Vector{String}}(),
+            Dict{String,TestRunState}(),
             Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
             Set{TestEnvironment}(),
             error_handler_file,
             crash_reporting_pipename,
-            log_level
+            log_level,
+            controller_fsm("controller")
         )
     end
 end
 
 function shutdown(controller::TestItemController)
     @info "Queueing controller shutdown"
-    put!(controller.msg_channel, (;event=:shutdown))
+    put!(controller.reactor_channel, ShutdownMsg())
 end
 
 function terminate_test_process(controller::TestItemController, id::String)
-    @debug "Queueing test process termination" id
-    for v in values(controller.testprocesses)
-        for p in v
-            if p.id == id
-                put!(p.msg_channel, (;event=:terminate))
-            end
+    @debug "Terminating test process" id
+    if haskey(controller.test_processes, id)
+        ps = controller.test_processes[id]
+        _kill_julia_process!(ps)
+        if ps.testrun_id !== nothing
+            put!(controller.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, id))
         end
-    end    
-  
+        put!(controller.reactor_channel, TestProcessTerminatedMsg(id))
+    end
     return nothing
 end
 
-function Base.run(
-        controller::TestItemController,
-        testprocess_created_callback=nothing,
-        testprocess_terminated=nothing,
-        testprocess_statuschanged=nothing,
-        testprocess_output=nothing
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+# Reactor event loop
+# ═══════════════════════════════════════════════════════════════════════════════
 
+function Base.run(controller::TestItemController)
     while true
-        msg = take!(controller.msg_channel)
-        @debug "Msg $(msg.event)" msg
+        msg = take!(controller.reactor_channel)
+        @debug "Reactor msg" msg_type=typeof(msg).name.name
 
-        if msg.event == :shutdown
-            @info "Shutting down controller, terminating $(sum(length, values(controller.testprocesses), init=0)) test process(es)"
-            for i in Iterators.flatten(values(controller.testprocesses))
-                put!(
-                    i.msg_channel,
-                    (;
-                        event = :shutdown
-                    )
-                )
+        try
+            should_stop = handle!(controller, msg)
+            should_stop === true && break
+        catch err
+            @error "Error handling reactor message" msg_type=typeof(msg).name.name exception=(err, catch_backtrace())
+            if controller.err_handler !== nothing
+                controller.err_handler(err, catch_backtrace())
             end
-            break
-        elseif msg.event == :test_process_status_changed
-            @debug "Forwarding test process status change" id=msg.id status=msg.status
-            # Inform the user via callback
-            if testprocess_statuschanged!==nothing
-                testprocess_statuschanged(msg.id, msg.status)
-            end
-        elseif msg.event == :testprocess_output
-            @debug "Forwarding test process output" id=msg.id ncodeunits=ncodeunits(msg.output)
-            if testprocess_output!==nothing
-                testprocess_output(msg.id, msg.output)
-            end
-        elseif msg.event == :test_process_terminated
-            @info "Test process '$(msg.id)' terminated"
-            for procs in values(controller.testprocesses)
-                ind = findfirst(i->i.id==msg.id, procs)
-                if ind!==nothing
-                    deleteat!(procs, ind)
-                    break
-                end
-            end
-
-            # Inform the user via callback
-            if testprocess_terminated!==nothing
-                testprocess_terminated(msg.id)
-            end
-        elseif msg.event == :return_to_pool
-            if msg.testprocess.idle
-                # Already returned to pool (e.g. via "nothing to steal" path),
-                # skip duplicate :end_testrun to avoid invalid state transition.
-                @debug "Ignoring duplicate return_to_pool" id=msg.testprocess.id
-                continue
-            end
-            @info "Test process '$(msg.testprocess.id)' finished its test run, returning to pool"
-            put!(msg.testprocess.msg_channel, (;event=:end_testrun))
-            msg.testprocess.idle = true
-            if testprocess_statuschanged!==nothing
-                testprocess_statuschanged(msg.testprocess.id, "Idle")
-            end
-        elseif msg.event == :get_procs_for_testrun
-            @debug "Acquiring test processes for test run" testrun_id=msg.testrun_id env_count=length(msg.proc_count_by_env)
-
-            our_procs = Dict{TestEnvironment,Vector{TestProcess}}()
-
-            for (k,v) in pairs(msg.proc_count_by_env)
-                our_procs[k] = TestProcess[]
-
-                testprocesses = get!(controller.testprocesses, k) do
-                    TestProcess[]
-                end
-
-                existing_idle_procs = filter(i->i.idle, testprocesses)
-
-                @debug "Inspecting environment pool" package_name=k.package_name requested=v existing=length(testprocesses) idle=length(existing_idle_procs) mode=k.mode
-
-                @debug "Test environment" project_uri=k.project_uri package_uri=k.package_uri package_name=k.package_name julia_cmd=k.juliaCmd julia_num_threads=k.juliaNumThreads mode=k.mode env=k.env requested=v existing=length(testprocesses) idle=length(existing_idle_procs)
-
-                @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv: $(k.env)\n\nWe need $v procs, there are $(length(testprocesses)) processes, of which $(length(existing_idle_procs)) are idle."
-
-                # Grab existing procs
-                for p in Iterators.take(existing_idle_procs, v)
-                    @info "Reusing idle test process '$(p.id)' for package '$(k.package_name)'"
-                    put!(
-                        p.msg_channel,
-                        (
-                            event = :start_testrun,
-                            testrun_channel = msg.testrun_msg_queue,
-                            test_setups = msg.test_setups,
-                            coverage_root_uris = msg.coverage_root_uris,
-                            log_level = msg.log_level,
-                            token = msg.testrun_token
-                        )
-                    )
-
-                    p.idle = false
-                    push!(our_procs[k], p)
-
-                    @debug "Queueing revise on reused process" id=p.id env_hash=msg.env_content_hash_by_env[k]
-                    put!(p.msg_channel, (event=:revise, test_env_content_hash=msg.env_content_hash_by_env[k]))
-                end
-
-                # Now comes a horrible hack for old Julia versions: pre Julia 1.10 parallel precompile
-                # crashes Julia. If we are on one of these old Julia verions, we need to precompile
-                # the test process itself once before we do anything else. We do this only once per
-                # Julia version per session
-                if !(
-                    (
-                        julia_cmd=k.juliaCmd,
-                        julia_args=k.juliaArgs,
-                        env=k.env,
-                        coverage=k.mode == "Coverage"
-                    ) in controller.testprocess_precompile_not_required)
-
-                    @debug "Checking whether test environment precompilation is needed"
-                    coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
-
-                    jlEnv = copy(ENV)
-                    for (k,v) in pairs(k.env)
-                        if v!==nothing
-                            jlEnv[k] = v
-                        elseif haskey(jlEnv, k)
-                            delete!(jlEnv, k)
-                        end
-                    end
-
-                    julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
-                    julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
-                    julia_version = VersionNumber(julia_version_as_string)
-
-                    if julia_version <= v"1.10.0"
-                        testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
-
-                        precompile_success = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
-
-                        @debug "Precompile of test server" precompile_success
-
-                        push!(controller.testprocess_precompile_not_required, (
-                            julia_cmd=k.juliaCmd,
-                            julia_args=k.juliaArgs,
-                            env=k.env,
-                            coverage=k.mode == "Coverage"
-                        ))
-                    else
-                        @debug "Julia version is new enough"
-                    end
-                else
-                    @debug "Precompile check has been done already"
-                end
-
-
-                precompile_required = !(k in controller.precompiled_envs)
-
-                identified_precompile_proc = false
-
-                while length(our_procs[k]) < v
-                    @info "Launching new test process for package '$(k.package_name)'"
-
-                    # The first process we create will be the precompile proc if we need one
-                    this_is_the_precompile_proc = precompile_required && !identified_precompile_proc
-                    identified_precompile_proc =true
-
-                    @debug "Creating test process" package_name=k.package_name testrun_id=msg.testrun_id precompile=this_is_the_precompile_proc
-
-                    testprocess_id, testprocess_msg_channel = create_testprocess(
-                        controller.msg_channel,
-                        k,
-                        this_is_the_precompile_proc,msg.env_content_hash_by_env[k],
-                        controller.error_handler_file,
-                        controller.crash_reporting_pipename
-                    )
-
-                    @debug "Queueing start_testrun on new process" id=testprocess_id testrun_id=msg.testrun_id
-                    put!(
-                        testprocess_msg_channel,
-                        (
-                            event = :start_testrun,
-                            testrun_channel = msg.testrun_msg_queue,
-                            test_setups = msg.test_setups,
-                            coverage_root_uris = msg.coverage_root_uris,
-                            log_level = msg.log_level,
-                            token = msg.testrun_token
-                        )
-                    )
-
-                    @debug "Queueing process start" id=testprocess_id
-                    put!(
-                        testprocess_msg_channel,
-                        (;
-                            event = :start,
-                        )
-                    )
-
-                    p = TestProcess(testprocess_id, testprocess_msg_channel, false)
-
-                    push!(our_procs[k], p)
-
-                    push!(testprocesses, p)
-
-                    if testprocess_created_callback!==nothing
-                        testprocess_created_callback(testprocess_id, k.package_name, k.package_uri, k.project_uri, k.mode == "Coverage", k.env)
-                    end
-                end
-            end
-
-            @info "Sending $(sum(length, values(our_procs), init=0)) test process(es) to test run '$(msg.testrun_id)'"
-            put!(
-                msg.testrun_msg_queue,
-                (
-                    source=:controller,
-                    msg=(
-                        event=:procs_acquired,
-                        procs=our_procs,
-                    )
-                )
-            )
-        else
-            error("Unknown message")
         end
     end
 end
 
-function makechunks(X::AbstractVector, n::Integer)
-    if n<1
-        error("n is smaller than 1")
+# ═══════════════════════════════════════════════════════════════════════════════
+# Controller-level handlers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function handle!(c::TestItemController, ::ShutdownMsg)
+    @info "Shutting down controller, terminating $(length(c.test_processes)) test process(es)"
+    transition!(c.controller_fsm, ControllerShuttingDown; reason="shutdown requested")
+
+    # Cancel all active test runs and signal completion
+    for (trid, tr) in c.test_runs
+        if state(tr.fsm) ∉ (TestRunCancelled, TestRunCompleted)
+            CancellationTokens.cancel(tr.cancellation_source)
+            for (id, _) in tr.remaining_items
+                c.callbacks.on_testitem_skipped(trid, id)
+            end
+            transition!(tr.fsm, TestRunCancelled; reason="shutdown")
+            try put!(tr.completion_channel, missing) catch end
+        end
     end
-    c = length(X) ÷ n
-    return [X[1+c*k:(k == n-1 ? end : c*k+c)] for k = 0:n-1]
+
+    # Shutdown all processes
+    for (pid, ps) in c.test_processes
+        if state(ps.fsm) != ProcessDead
+            _shutdown_test_process!(c, ps)
+        end
+    end
+
+    if isempty(c.test_processes)
+        transition!(c.controller_fsm, ControllerStopped; reason="no processes to drain")
+        return true  # break reactor loop
+    end
+    return false
 end
 
-struct TestProfile
-    id::String
-    label::String
-    julia_cmd::String
-    julia_args::Vector{String}
-    julia_num_threads::Union{Missing,String}
-    julia_env::Dict{String,Union{String,Nothing}}
-    max_process_count::Int
-    mode::String
-    coverage_root_uris::Union{Nothing,Vector{String}}
-    log_level::Symbol
+function handle!(c::TestItemController, msg::TestProcessStatusChangedMsg)
+    @debug "Forwarding test process status change" id=msg.testprocess_id status=msg.status
+    if c.callbacks.on_process_status_changed !== nothing
+        c.callbacks.on_process_status_changed(msg.testprocess_id, msg.status)
+    end
+    return false
 end
 
-struct TestItemDetail
-    id::String
-    uri::String
-    label::String
-    package_name::Union{Nothing,String}
-    package_uri::Union{Nothing,String}
-    project_uri::Union{Nothing,String}
-    env_content_hash::Union{Nothing,String}
-    option_default_imports::Bool
-    test_setups::Vector{String}
-    line::Int
-    column::Int
-    code::String
-    code_line::Int
-    code_column::Int
+function handle!(c::TestItemController, msg::TestProcessOutputMsg)
+    @debug "Forwarding test process output" id=msg.testprocess_id ncodeunits=ncodeunits(msg.output)
+    if c.callbacks.on_process_output !== nothing
+        c.callbacks.on_process_output(msg.testprocess_id, msg.output)
+    end
+    return false
 end
 
-struct TestSetupDetail
-    package_uri::String
-    name::String
-    kind::String
-    uri::String
-    line::Int
-    column::Int
-    code::String
+function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
+    @info "Test process '$(msg.testprocess_id)' terminated"
+
+    if haskey(c.test_processes, msg.testprocess_id)
+        ps = c.test_processes[msg.testprocess_id]
+        if state(ps.fsm) != ProcessDead
+            transition!(ps.fsm, ProcessDead; reason="terminated")
+        end
+
+        # Remove from pool
+        pool_ids = get(c.process_pool, ps.env, String[])
+        idx = findfirst(isequal(msg.testprocess_id), pool_ids)
+        if idx !== nothing
+            deleteat!(pool_ids, idx)
+        end
+
+        delete!(c.test_processes, msg.testprocess_id)
+    end
+
+    if c.callbacks.on_process_terminated !== nothing
+        c.callbacks.on_process_terminated(msg.testprocess_id)
+    end
+
+    # If shutting down and all processes gone, transition to stopped
+    if state(c.controller_fsm) == ControllerShuttingDown && isempty(c.test_processes)
+        transition!(c.controller_fsm, ControllerStopped; reason="all processes terminated")
+        return true  # break reactor loop
+    end
+    return false
 end
+
+function handle!(c::TestItemController, msg::ReturnToPoolMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        @debug "Ignoring return_to_pool for unknown process" id=msg.testprocess_id
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+    if state(ps.fsm) == ProcessIdle
+        @debug "Ignoring duplicate return_to_pool" id=msg.testprocess_id
+        return false
+    end
+
+    @info "Test process '$(msg.testprocess_id)' finished its test run, returning to pool"
+    _clear_testrun_on_process!(ps)
+
+    if state(ps.fsm) == ProcessStarting
+        # Process is still starting up; testrun cleared, it will transition to Idle
+        # when TestProcessLaunchedMsg arrives and sees testrun_id is null
+        @debug "Cleared testrun metadata while process is still starting" id=msg.testprocess_id
+    elseif state(ps.fsm) != ProcessDead
+        transition!(ps.fsm, ProcessIdle; reason="returned to pool")
+    end
+
+    if c.callbacks.on_process_status_changed !== nothing
+        c.callbacks.on_process_status_changed(msg.testprocess_id, "Idle")
+    end
+
+    # If shutting down, immediately terminate the returned process
+    if state(c.controller_fsm) == ControllerShuttingDown
+        _shutdown_test_process!(c, ps)
+    end
+    return false
+end
+
+function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
+    # Guard: reject new test runs during shutdown
+    if state(c.controller_fsm) != ControllerRunning
+        @warn "Rejecting test run request during shutdown" testrun_id=msg.testrun_id
+        if haskey(c.test_runs, msg.testrun_id)
+            tr = c.test_runs[msg.testrun_id]
+            CancellationTokens.cancel(tr.cancellation_source)
+        end
+        return false
+    end
+
+    @debug "Acquiring test processes for test run" testrun_id=msg.testrun_id env_count=length(msg.proc_count_by_env)
+
+    our_procs = Dict{TestEnvironment,Vector{String}}()
+
+    for (k, v) in pairs(msg.proc_count_by_env)
+        our_procs[k] = String[]
+
+        pool_ids = get!(c.process_pool, k) do
+            String[]
+        end
+
+        # Find idle processes in pool
+        existing_idle_ids = filter(pool_ids) do pid
+            haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) == ProcessIdle
+        end
+
+        @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv: $(k.env)\n\nWe need $v procs, there are $(length(pool_ids)) processes, of which $(length(existing_idle_ids)) are idle."
+
+        # Grab existing idle procs
+        for pid in Iterators.take(existing_idle_ids, v)
+            ps = c.test_processes[pid]
+            @info "Reusing idle test process '$(pid)' for package '$(k.package_name)'"
+
+            testrun_token = haskey(c.test_runs, msg.testrun_id) ?
+                CancellationTokens.get_token(c.test_runs[msg.testrun_id].cancellation_source) : nothing
+
+            _setup_testrun_on_process!(ps, msg.testrun_id, msg.test_setups, msg.coverage_root_uris, msg.log_level, testrun_token)
+
+            transition!(ps.fsm, ProcessReviseOrStart; reason="reused for testrun")
+
+            push!(our_procs[k], pid)
+
+            env_hash = get(msg.env_content_hash_by_env, k, nothing)
+
+            if ps.endpoint === nothing || env_hash != ps.test_env_content_hash
+                # No endpoint or hash changed — need full restart
+                @debug "Restarting process (no endpoint or env hash changed)" testprocess_id=pid
+                ps.test_env_content_hash = env_hash
+                transition!(ps.fsm, ProcessStarting; reason="restart needed")
+                _launch_julia_process!(c, ps)
+            else
+                # Try revise
+                transition!(ps.fsm, ProcessRevising; reason="revising")
+                put!(c.reactor_channel, TestProcessStatusChangedMsg(pid, "Revising"))
+                _start_revise!(c, ps, env_hash)
+            end
+        end
+
+        # Pre-1.10 Julia version precompile hack
+        if !(
+            (
+                julia_cmd=k.juliaCmd,
+                julia_args=k.juliaArgs,
+                env=k.env,
+                coverage=k.mode == "Coverage"
+            ) in c.testprocess_precompile_not_required)
+
+            @debug "Checking whether test environment precompilation is needed"
+            coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
+
+            jlEnv = copy(ENV)
+            for (ek, ev) in pairs(k.env)
+                if ev !== nothing
+                    jlEnv[ek] = ev
+                elseif haskey(jlEnv, ek)
+                    delete!(jlEnv, ek)
+                end
+            end
+
+            julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
+            julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
+            julia_version = VersionNumber(julia_version_as_string)
+
+            if julia_version <= v"1.10.0"
+                testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
+
+                precompile_success = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
+
+                @debug "Precompile of test server" precompile_success
+
+                push!(c.testprocess_precompile_not_required, (
+                    julia_cmd=k.juliaCmd,
+                    julia_args=k.juliaArgs,
+                    env=k.env,
+                    coverage=k.mode == "Coverage"
+                ))
+            end
+        end
+
+        precompile_required = !(k in c.precompiled_envs)
+        identified_precompile_proc = false
+
+        while length(our_procs[k]) < v
+            @info "Launching new test process for package '$(k.package_name)'"
+
+            this_is_the_precompile_proc = precompile_required && !identified_precompile_proc
+            identified_precompile_proc = true
+
+            env_hash = get(msg.env_content_hash_by_env, k, nothing)
+            testprocess_id = string(UUIDs.uuid4())
+
+            # Create TestProcessState and register it
+            ps = TestProcessState(testprocess_id, k;
+                is_precompile_process=this_is_the_precompile_proc,
+                test_env_content_hash=env_hash)
+            c.test_processes[testprocess_id] = ps
+
+            push!(pool_ids, testprocess_id)
+
+            testrun_token = haskey(c.test_runs, msg.testrun_id) ?
+                CancellationTokens.get_token(c.test_runs[msg.testrun_id].cancellation_source) : nothing
+
+            _setup_testrun_on_process!(ps, msg.testrun_id, msg.test_setups, msg.coverage_root_uris, msg.log_level, testrun_token)
+
+            transition!(ps.fsm, ProcessStarting; reason="new process")
+            _launch_julia_process!(c, ps)
+
+            push!(our_procs[k], testprocess_id)
+
+            if c.callbacks.on_process_created !== nothing
+                c.callbacks.on_process_created(testprocess_id, k.package_name, k.package_uri, k.project_uri, k.mode == "Coverage", k.env)
+            end
+        end
+    end
+
+    @info "Sending $(sum(length, values(our_procs), init=0)) test process(es) to test run '$(msg.testrun_id)'"
+    put!(
+        c.reactor_channel,
+        ProcsAcquiredMsg(msg.testrun_id, our_procs)
+    )
+    return false
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test-run handlers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        @debug "Ignoring ProcsAcquiredMsg for unknown test run" testrun_id=msg.testrun_id
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+
+    if state(tr.fsm) == TestRunCancelled
+        # Cancellation arrived before process acquisition completed.
+        @info "Returning $(sum(length, values(msg.procs), init=0)) process(es) to pool after deferred cancellation"
+        for pid in Iterators.flatten(values(msg.procs))
+            if haskey(c.test_processes, pid)
+                ps = c.test_processes[pid]
+                put!(c.reactor_channel, ReturnToPoolMsg(pid, ps.env))
+            end
+        end
+        return false
+    end
+
+    transition!(tr.fsm, TestRunProcsAcquired; reason="procs acquired")
+    tr.procs = msg.procs
+
+    @info "Acquired $(sum(length, values(msg.procs), init=0)) test process(es) for test run"
+
+    # Distribute test items over test processes
+    for (env, proc_ids) in pairs(msg.procs)
+        assigned_for_env = 0
+        n_procs_for_env = length(proc_ids)
+        for pid in proc_ids
+            tr.stolen_ids_by_proc[pid] = String[]
+
+            if !haskey(tr.testitem_ids_by_proc, pid)
+                # Divvy up items: take a chunk for this process
+                all_env_items = _get_unchunked_items(tr, env)
+                procs_remaining = n_procs_for_env - assigned_for_env
+                chunk_size = max(1, div(length(all_env_items), procs_remaining, RoundUp))
+                chunk = splice!(all_env_items, 1:min(chunk_size, length(all_env_items)))
+                tr.testitem_ids_by_proc[pid] = chunk
+                assigned_for_env += 1
+                @info "Assigned $(length(chunk)) test item(s) to process '$(pid)'"
+            end
+        end
+    end
+
+    # Dispatch buffered ready notifications
+    for pid in tr.processes_ready_before_acquired
+        if haskey(tr.testitem_ids_by_proc, pid) && haskey(c.test_processes, pid)
+            ps = c.test_processes[pid]
+            items_for_proc = [tr.remaining_items[id] for id in tr.testitem_ids_by_proc[pid] if haskey(tr.remaining_items, id)]
+            @debug "Dispatching buffered test items to ready process" testrun_id=msg.testrun_id process_id=pid assigned=length(items_for_proc)
+            if state(ps.fsm) == ProcessReadyToRun
+                transition!(ps.fsm, ProcessRunning; reason="dispatching buffered items")
+            end
+            _send_run_testitems!(c, ps, items_for_proc)
+            push!(tr.items_dispatched_to_procs, pid)
+        end
+    end
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestRunCancelledMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    @info "Test run cancelled, skipping $(length(tr.remaining_items)) remaining test item(s)"
+
+    if state(tr.fsm) == TestRunWaitingForProcs
+        transition!(tr.fsm, TestRunCancelled; reason="cancelled before procs acquired")
+    elseif state(tr.fsm) in (TestRunProcsAcquired, TestRunRunning)
+        transition!(tr.fsm, TestRunCancelled; reason="cancelled")
+    else
+        transition!(tr.fsm, TestRunCancelled; reason="cancelled from $(state(tr.fsm))")
+    end
+
+    CancellationTokens.cancel(tr.cancellation_source)
+
+    # Report all remaining test items as skipped
+    for (id, _) in tr.remaining_items
+        c.callbacks.on_testitem_skipped(msg.testrun_id, id)
+    end
+
+    # Kill Julia processes and return all processes to pool
+    if tr.procs !== nothing
+        for pid in Iterators.flatten(values(tr.procs))
+            if haskey(c.test_processes, pid)
+                ps = c.test_processes[pid]
+                _kill_julia_process!(ps)
+                put!(c.reactor_channel, ReturnToPoolMsg(pid, ps.env))
+            end
+        end
+    end
+
+    # Signal completion
+    try put!(tr.completion_channel, missing) catch end
+    return false
+end
+
+function handle!(c::TestItemController, msg::ReadyToRunTestItemsMsg)
+    if !haskey(c.test_runs, msg.testrun_id) || !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    if state(tr.fsm) == TestRunProcsAcquired || state(tr.fsm) == TestRunRunning
+        @info "Test process '$(msg.testprocess_id)' is ready, dispatching test items"
+        items_for_proc = [tr.remaining_items[id] for id in get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]) if haskey(tr.remaining_items, id)]
+        if state(ps.fsm) == ProcessReadyToRun
+            transition!(ps.fsm, ProcessRunning; reason="dispatching items")
+        end
+        _send_run_testitems!(c, ps, items_for_proc)
+        push!(tr.items_dispatched_to_procs, msg.testprocess_id)
+    elseif state(tr.fsm) == TestRunWaitingForProcs
+        @info "Test process '$(msg.testprocess_id)' is ready, waiting for process acquisition to finish"
+        push!(tr.processes_ready_before_acquired, msg.testprocess_id)
+    end
+    return false
+end
+
+function handle!(c::TestItemController, msg::PrecompileDoneMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+
+    @info "Test process '$(msg.testprocess_id)' completed precompilation for package '$(msg.env.package_name)'"
+    push!(c.precompiled_envs, msg.env)
+
+    # Notify peer processes that are waiting for precompile
+    if tr.procs !== nothing && haskey(tr.procs, msg.env)
+        for pid in tr.procs[msg.env]
+            if pid != msg.testprocess_id && haskey(c.test_processes, pid)
+                ps = c.test_processes[pid]
+                ps.precompile_done = true
+                if state(ps.fsm) == ProcessWaitingForPrecompile
+                    @debug "Peer process completed precompile, activating" testprocess_id=pid
+                    transition!(ps.fsm, ProcessActivatingEnv; reason="precompile_by_other_proc_done")
+                    _activate_env!(c, ps)
+                end
+            end
+        end
+    end
+    return false
+end
+
+function handle!(c::TestItemController, msg::AttachDebuggerMsg)
+    c.callbacks.on_attach_debugger(msg.testrun_id, msg.debug_pipe_name)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemStartedMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    if state(tr.fsm) == TestRunProcsAcquired
+        transition!(tr.fsm, TestRunRunning; reason="first test item started")
+    end
+
+    c.callbacks.on_testitem_started(msg.testrun_id, msg.testitem_id)
+
+    # Start timeout if item has one
+    if haskey(c.test_processes, msg.testprocess_id) && haskey(tr.remaining_items, msg.testitem_id)
+        ps = c.test_processes[msg.testprocess_id]
+        item = tr.remaining_items[msg.testitem_id]
+        ps.current_testitem_id = msg.testitem_id
+        ps.current_testitem_started_at = time()
+
+        if item.timeout !== nothing
+            ps.timeout_cs = CancellationTokens.CancellationTokenSource(item.timeout)
+            ps.timeout_reg = CancellationTokens.register(CancellationTokens.get_token(ps.timeout_cs)) do
+                try
+                    put!(c.reactor_channel, TestItemTimeoutMsg(msg.testrun_id, msg.testprocess_id, msg.testitem_id))
+                catch
+                end
+            end
+        end
+    end
+    return false
+end
+
+function _cancel_timeout!(ps::TestProcessState)
+    if ps.timeout_cs !== nothing
+        CancellationTokens.cancel(ps.timeout_cs)
+        ps.timeout_cs = nothing
+    end
+    if ps.timeout_reg !== nothing
+        try close(ps.timeout_reg) catch end
+        ps.timeout_reg = nothing
+    end
+    ps.current_testitem_id = nothing
+    ps.current_testitem_started_at = nothing
+end
+
+function handle!(c::TestItemController, msg::TestItemPassedMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    # Cancel timeout
+    if haskey(c.test_processes, msg.testprocess_id)
+        _cancel_timeout!(c.test_processes[msg.testprocess_id])
+    end
+
+    # Handle stolen tracking
+    stolen_idx = findfirst(isequal(msg.testitem_id), get(tr.stolen_ids_by_proc, msg.testprocess_id, String[]))
+    if stolen_idx !== nothing
+        deleteat!(tr.stolen_ids_by_proc[msg.testprocess_id], stolen_idx)
+    end
+
+    if haskey(tr.remaining_items, msg.testitem_id)
+        delete!(tr.remaining_items, msg.testitem_id)
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+
+        c.callbacks.on_testitem_passed(msg.testrun_id, msg.testitem_id, msg.duration)
+
+        if msg.coverage !== nothing && msg.coverage !== missing
+            append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
+        end
+    else
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+    end
+
+    _check_stealing!(c, tr, msg.testprocess_id)
+    _check_testrun_complete!(c, tr)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemFailedMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    if haskey(c.test_processes, msg.testprocess_id)
+        _cancel_timeout!(c.test_processes[msg.testprocess_id])
+    end
+
+    stolen_idx = findfirst(isequal(msg.testitem_id), get(tr.stolen_ids_by_proc, msg.testprocess_id, String[]))
+    if stolen_idx !== nothing
+        deleteat!(tr.stolen_ids_by_proc[msg.testprocess_id], stolen_idx)
+    end
+
+    if haskey(tr.remaining_items, msg.testitem_id)
+        delete!(tr.remaining_items, msg.testitem_id)
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+
+        c.callbacks.on_testitem_failed(
+            msg.testrun_id,
+            msg.testitem_id,
+            TestItemControllerProtocol.TestMessage[
+                TestItemControllerProtocol.TestMessage(
+                    message = i.message,
+                    expectedOutput = i.expectedOutput,
+                    actualOutput = i.actualOutput,
+                    uri = i.location.uri,
+                    line = i.location.position.line,
+                    column = i.location.position.character
+                ) for i in msg.messages
+            ],
+            msg.duration
+        )
+    else
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+    end
+
+    _check_stealing!(c, tr, msg.testprocess_id)
+    _check_testrun_complete!(c, tr)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemErroredMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    if haskey(c.test_processes, msg.testprocess_id)
+        _cancel_timeout!(c.test_processes[msg.testprocess_id])
+    end
+
+    stolen_idx = findfirst(isequal(msg.testitem_id), get(tr.stolen_ids_by_proc, msg.testprocess_id, String[]))
+    if stolen_idx !== nothing
+        deleteat!(tr.stolen_ids_by_proc[msg.testprocess_id], stolen_idx)
+    end
+
+    if haskey(tr.remaining_items, msg.testitem_id)
+        delete!(tr.remaining_items, msg.testitem_id)
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+
+        c.callbacks.on_testitem_errored(
+            msg.testrun_id,
+            msg.testitem_id,
+            TestItemControllerProtocol.TestMessage[
+                TestItemControllerProtocol.TestMessage(
+                    message = i.message,
+                    expectedOutput = missing,
+                    actualOutput = missing,
+                    uri = i.location.uri,
+                    line = i.location.position.line,
+                    column = i.location.position.character
+                ) for i in msg.messages
+            ],
+            msg.duration
+        )
+    else
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+    end
+
+    _check_stealing!(c, tr, msg.testprocess_id)
+    _check_testrun_complete!(c, tr)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemSkippedStolenMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    stolen_idx = findfirst(isequal(msg.testitem_id), get(tr.stolen_ids_by_proc, msg.testprocess_id, String[]))
+    if stolen_idx !== nothing
+        deleteat!(tr.stolen_ids_by_proc[msg.testprocess_id], stolen_idx)
+    end
+
+    # Cancel timeout if this item is the active one
+    if haskey(c.test_processes, msg.testprocess_id)
+        ps = c.test_processes[msg.testprocess_id]
+        if ps.current_testitem_id == msg.testitem_id
+            _cancel_timeout!(ps)
+        end
+    end
+
+    _check_stealing!(c, tr, msg.testprocess_id)
+    _check_testrun_complete!(c, tr)
+    return false
+end
+
+function handle!(c::TestItemController, msg::AppendOutputMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    c.callbacks.on_append_output(msg.testrun_id, msg.testitem_id, msg.output)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    terminated_proc_id = msg.testprocess_id
+
+    # Collect remaining items from the dead process's queue
+    items_to_redistribute = String[]
+    if haskey(tr.testitem_ids_by_proc, terminated_proc_id)
+        for testitem_id in tr.testitem_ids_by_proc[terminated_proc_id]
+            if haskey(tr.remaining_items, testitem_id)
+                push!(items_to_redistribute, testitem_id)
+            end
+        end
+        empty!(tr.testitem_ids_by_proc[terminated_proc_id])
+    end
+    if haskey(tr.stolen_ids_by_proc, terminated_proc_id)
+        empty!(tr.stolen_ids_by_proc[terminated_proc_id])
+    end
+
+    # Find the environment of the terminated process
+    terminated_env = nothing
+    if tr.procs !== nothing
+        for (env, pids) in pairs(tr.procs)
+            idx = findfirst(isequal(terminated_proc_id), pids)
+            if idx !== nothing
+                terminated_env = env
+                deleteat!(pids, idx)
+                break
+            end
+        end
+    end
+
+    # Note: TestProcessTerminatedMsg for pool cleanup is posted by testprocess.jl's
+    # event loop (alongside this TestProcessTerminatedInRunMsg), so we don't post it here.
+
+    if isempty(items_to_redistribute)
+        @info "Test process '$(terminated_proc_id)' terminated during test run, no remaining items to redistribute"
+        _check_testrun_complete!(c, tr)
+        return false
+    end
+
+    # If shutting down, skip remaining items instead of redistributing
+    if state(c.controller_fsm) != ControllerRunning || terminated_env === nothing
+        @info "Test process '$(terminated_proc_id)' terminated, skipping $(length(items_to_redistribute)) remaining item(s) (controller shutting down or env unknown)"
+        for testitem_id in items_to_redistribute
+            if haskey(tr.remaining_items, testitem_id)
+                delete!(tr.remaining_items, testitem_id)
+                c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id)
+            end
+        end
+        _check_testrun_complete!(c, tr)
+        return false
+    end
+
+    @info "Test process '$(terminated_proc_id)' terminated during test run, redistributing $(length(items_to_redistribute)) remaining item(s)"
+
+    # Track consecutive crashes — prevent infinite crash→redistribute→crash loops
+    tr.process_crash_count += 1
+    max_crash_retries = 3
+    @debug "Process crash count for test run" testrun_id=msg.testrun_id crash_count=tr.process_crash_count max_retries=max_crash_retries
+
+    if tr.process_crash_count > max_crash_retries
+        @error "Test run exceeded maximum process crash retries ($(max_crash_retries)), failing remaining items" testrun_id=msg.testrun_id crash_count=tr.process_crash_count remaining_items=length(items_to_redistribute)
+        for testitem_id in items_to_redistribute
+            if haskey(tr.remaining_items, testitem_id)
+                item = tr.remaining_items[testitem_id]
+                delete!(tr.remaining_items, testitem_id)
+                c.callbacks.on_testitem_errored(
+                    msg.testrun_id,
+                    testitem_id,
+                    TestItemControllerProtocol.TestMessage[
+                        TestItemControllerProtocol.TestMessage(
+                            message = "Test process crashed $(tr.process_crash_count) time(s) for test item '$(item.label)'. Giving up after $(max_crash_retries) retries.",
+                            expectedOutput = missing,
+                            actualOutput = missing,
+                            uri = item.uri,
+                            line = item.line,
+                            column = item.column
+                        )
+                    ],
+                    missing
+                )
+            end
+        end
+        _check_testrun_complete!(c, tr)
+        return false
+    end
+
+    # Try to find another process in the same env that's part of this testrun
+    recipient_pid = nothing
+    if tr.procs !== nothing && haskey(tr.procs, terminated_env)
+        for pid in tr.procs[terminated_env]
+            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead
+                recipient_pid = pid
+                break
+            end
+        end
+    end
+
+    if recipient_pid !== nothing
+        # Redistribute to existing process
+        ps = c.test_processes[recipient_pid]
+        append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
+
+        items_to_run = [tr.remaining_items[id] for id in items_to_redistribute if haskey(tr.remaining_items, id)]
+        @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
+        _send_run_testitems!(c, ps, items_to_run)
+    else
+        # Create a new process for the redistributed items
+        env = terminated_env
+        profile = tr.profiles[1]
+
+        env_content_hash = nothing
+        for id in items_to_redistribute
+            if haskey(tr.remaining_items, id)
+                env_content_hash = tr.remaining_items[id].env_content_hash
+                break
+            end
+        end
+
+        @info "Creating new replacement process for package '$(env.package_name)'"
+
+        # If precompile already done for this env, tell the new process so it
+        # doesn't wait for a peer that no longer exists.
+        precompile_already_done = env in c.precompiled_envs
+
+        testprocess_id = string(UUIDs.uuid4())
+
+        # Create TestProcessState and register it
+        new_ps = TestProcessState(testprocess_id, env;
+            is_precompile_process=precompile_already_done,
+            precompile_done=precompile_already_done,
+            test_env_content_hash=env_content_hash)
+        new_ps.testrun_id = msg.testrun_id
+        c.test_processes[testprocess_id] = new_ps
+
+        pool_ids = get!(c.process_pool, env) do; String[]; end
+        push!(pool_ids, testprocess_id)
+
+        # Add to testrun's procs
+        if tr.procs !== nothing
+            push!(get!(tr.procs, env) do; String[]; end, testprocess_id)
+        end
+
+        # Assign items to new process
+        tr.testitem_ids_by_proc[testprocess_id] = items_to_redistribute
+        tr.stolen_ids_by_proc[testprocess_id] = String[]
+
+        testrun_token = CancellationTokens.get_token(tr.cancellation_source)
+
+        # Build server-side test setup details
+        server_test_setups = [
+            TestItemServerProtocol.TestsetupDetails(
+                packageUri = i.package_uri,
+                name = i.name,
+                kind = i.kind,
+                uri = i.uri,
+                line = i.line,
+                column = i.column,
+                code = i.code
+            ) for i in tr.test_setups
+        ]
+
+        _setup_testrun_on_process!(new_ps, msg.testrun_id, server_test_setups, profile.coverage_root_uris, profile.log_level, testrun_token)
+
+        transition!(new_ps.fsm, ProcessStarting; reason="replacement process")
+        _launch_julia_process!(c, new_ps)
+
+        if c.callbacks.on_process_created !== nothing
+            c.callbacks.on_process_created(testprocess_id, env.package_name, env.package_uri, env.project_uri, env.mode == "Coverage", env.env)
+        end
+    end
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
+    if !haskey(c.test_runs, msg.testrun_id) || !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    ps = c.test_processes[msg.testprocess_id]
+
+    # Guard against stale timeout
+    if ps.current_testitem_id != msg.testitem_id
+        return false
+    end
+
+    item = get(tr.remaining_items, msg.testitem_id, nothing)
+    item_label = item !== nothing ? item.label : msg.testitem_id
+    timeout_val = item !== nothing && item.timeout !== nothing ? item.timeout : "?"
+
+    @warn "Test item '$(item_label)' timed out after $(timeout_val) seconds"
+
+    _cancel_timeout!(ps)
+
+    # Report item as errored
+    if haskey(tr.remaining_items, msg.testitem_id)
+        delete!(tr.remaining_items, msg.testitem_id)
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+
+        c.callbacks.on_testitem_errored(
+            msg.testrun_id,
+            msg.testitem_id,
+            TestItemControllerProtocol.TestMessage[
+                TestItemControllerProtocol.TestMessage(
+                    message = "Test item '$(item_label)' timed out after $(timeout_val) seconds",
+                    expectedOutput = missing,
+                    actualOutput = missing,
+                    uri = item !== nothing ? item.uri : missing,
+                    line = item !== nothing ? item.line : missing,
+                    column = item !== nothing ? item.column : missing
+                )
+            ],
+            missing
+        )
+    end
+
+    # Kill the process
+    if ps.jl_process !== nothing
+        try kill(ps.jl_process) catch end
+    end
+
+    # Post terminated in run message to handle redistribution
+    put!(c.reactor_channel, TestProcessTerminatedInRunMsg(msg.testrun_id, msg.testprocess_id))
+    return false
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Process-lifecycle handlers (from IO tasks)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function handle!(c::TestItemController, msg::TestProcessLaunchedMsg)
+    @debug "Handling TestProcessLaunchedMsg" testprocess_id=msg.testprocess_id process_known=haskey(c.test_processes, msg.testprocess_id)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        # Process was removed (e.g. shutdown), kill the stale Julia process
+        try kill(msg.jl_process) catch end
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) != ProcessStarting
+        # Process was cancelled/dead while starting, kill the stale process
+        @debug "Ignoring TestProcessLaunchedMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        try kill(msg.jl_process) catch end
+        return false
+    end
+
+    ps.jl_process = msg.jl_process
+    ps.endpoint = msg.endpoint
+
+    # Process connected successfully — reset crash counter for its testrun
+    if ps.testrun_id !== nothing && haskey(c.test_runs, ps.testrun_id)
+        c.test_runs[ps.testrun_id].process_crash_count = 0
+    end
+
+    if ps.testrun_id === nothing
+        # Process launched but testrun already ended (e.g. cancelled while starting)
+        transition!(ps.fsm, ProcessIdle; reason="launched_without_testrun")
+        return false
+    end
+
+    if ps.is_precompile_process || ps.precompile_done
+        @debug "Activating environment after launch" testprocess_id=msg.testprocess_id precompile_process=ps.is_precompile_process precompile_done=ps.precompile_done
+        transition!(ps.fsm, ProcessActivatingEnv; reason="testprocess_launched")
+        _activate_env!(c, ps)
+    else
+        transition!(ps.fsm, ProcessWaitingForPrecompile; reason="waiting_for_peer_precompile")
+    end
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestProcessActivatedMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) != ProcessActivatingEnv
+        @debug "Ignoring TestProcessActivatedMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    transition!(ps.fsm, ProcessConfiguringTestRun; reason="testprocess_activated")
+
+    if ps.env.mode == "Debug" && ps.testrun_id !== nothing
+        @debug "Requesting debugger attachment" testprocess_id=msg.testprocess_id debug_pipe_name=ps.debug_pipe_name
+        put!(c.reactor_channel, AttachDebuggerMsg(ps.testrun_id, ps.debug_pipe_name))
+    end
+
+    @debug "Configuring test run on process" testprocess_id=msg.testprocess_id mode=ps.env.mode
+    _configure_testrun!(c, ps)
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestProcessTestSetupsLoadedMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) != ProcessConfiguringTestRun
+        @debug "Ignoring TestProcessTestSetupsLoadedMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    transition!(ps.fsm, ProcessReadyToRun; reason="testprocess_testsetups_loaded")
+    @info "Process is ready to run test items" testprocess_id=msg.testprocess_id
+
+    if ps.testrun_id !== nothing
+        put!(c.reactor_channel, ReadyToRunTestItemsMsg(ps.testrun_id, msg.testprocess_id))
+    end
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestProcessReviseResultMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) != ProcessRevising
+        @debug "Ignoring TestProcessReviseResultMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    if msg.needs_restart
+        @debug "Revise requested restart" testprocess_id=msg.testprocess_id
+        _kill_julia_process!(ps)
+        transition!(ps.fsm, ProcessStarting; reason="restart_after_revise")
+        _launch_julia_process!(c, ps)
+    else
+        @debug "Revise completed without restart" testprocess_id=msg.testprocess_id
+        transition!(ps.fsm, ProcessActivatingEnv; reason="revise_success")
+        _activate_env!(c, ps)
+    end
+
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) in (ProcessDead, ProcessIdle)
+        @debug "Ignoring IO error for process in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    @warn "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none")
+
+    _kill_julia_process!(ps)
+
+    if msg.error_type == :restart && ps.testrun_id !== nothing
+        # Restart the process for the current testrun
+        transition!(ps.fsm, ProcessStarting; reason="restart_after_io_error")
+        _launch_julia_process!(c, ps)
+    else
+        # Fatal error — terminate
+        if ps.testrun_id !== nothing
+            put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id))
+        end
+        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+    end
+
+    return false
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Process management helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function _kill_julia_process!(ps::TestProcessState)
+    if ps.julia_proc_cs !== nothing
+        try CancellationTokens.cancel(ps.julia_proc_cs) catch end
+    end
+    if ps.jl_process !== nothing
+        try kill(ps.jl_process) catch end
+    end
+    ps.jl_process = nothing
+    ps.endpoint = nothing
+    ps.julia_proc_cs = nothing
+end
+
+function _clear_testrun_on_process!(ps::TestProcessState)
+    if ps.testrun_watcher_registration !== nothing
+        try close(ps.testrun_watcher_registration) catch end
+        ps.testrun_watcher_registration = nothing
+    end
+    ps.testrun_id = nothing
+    ps.testrun_token = nothing
+    ps.test_setups = nothing
+    ps.coverage_root_uris = nothing
+end
+
+function _setup_testrun_on_process!(ps::TestProcessState, testrun_id::String, test_setups, coverage_root_uris, log_level::Symbol, testrun_token)
+    ps.testrun_id = testrun_id
+    ps.testrun_token = testrun_token
+    ps.test_setups = test_setups
+    ps.coverage_root_uris = coverage_root_uris
+    ps.proc_log_level = log_level
+end
+
+function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
+    @debug "Shutting down test process" testprocess_id=ps.id
+    CancellationTokens.cancel(ps.cs)
+    ep = ps.endpoint
+    if ep !== nothing
+        @async try
+            JSONRPC.send(ep, TestItemServerProtocol.testserver_shutdown_request_type, nothing)
+        catch err
+            @error "Error sending shutdown request" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
+    end
+    _kill_julia_process!(ps)
+    if ps.testrun_id !== nothing
+        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id))
+    end
+    put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+end
+
+function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
+    ps.julia_proc_cs = if ps.testrun_token !== nothing && !CancellationTokens.is_cancellation_requested(ps.testrun_token)
+        CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(ps.cs), ps.testrun_token)
+    else
+        CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(ps.cs))
+    end
+
+    @debug "Launching Julia process for test process" testprocess_id=ps.id package=ps.env.package_name mode=ps.env.mode is_precompile=ps.is_precompile_process precompile_done=ps.precompile_done testrun_id=something(ps.testrun_id, "none")
+    put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Launching"))
+
+    Base.ScopedValues.@with logging_node => "tp_$(ps.id[1:5])" @async try
+        start(ps.id, c.reactor_channel, ps, ps.env, ps.debug_pipe_name,
+              c.error_handler_file, c.crash_reporting_pipename,
+              CancellationTokens.get_token(ps.julia_proc_cs))
+    catch err
+        if !CancellationTokens.is_cancellation_requested(CancellationTokens.get_token(ps.julia_proc_cs))
+            @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
+    end
+end
+
+function _activate_env!(c::TestItemController, ps::TestProcessState)
+    put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Activating"))
+    @async try
+        JSONRPC.send(
+            ps.endpoint,
+            TestItemServerProtocol.testserver_activate_env_request_type,
+            TestItemServerProtocol.ActivateEnvParams(
+                projectUri = something(ps.env.project_uri, missing),
+                packageUri = ps.env.package_uri,
+                packageName = ps.env.package_name
+            )
+        )
+
+        if ps.is_precompile_process && ps.testrun_id !== nothing
+            put!(c.reactor_channel, PrecompileDoneMsg(ps.testrun_id, ps.env, ps.id))
+        end
+        put!(c.reactor_channel, TestProcessActivatedMsg(ps.id))
+    catch err
+        @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
+    end
+end
+
+function _configure_testrun!(c::TestItemController, ps::TestProcessState)
+    @async try
+        JSONRPC.send(
+            ps.endpoint,
+            TestItemServerProtocol.configure_testrun_request_type,
+            TestItemServerProtocol.ConfigureTestRunRequestParams(
+                mode = ps.env.mode,
+                logLevel = string(ps.proc_log_level),
+                coverageRootUris = something(ps.coverage_root_uris, missing),
+                testSetups = ps.test_setups
+            )
+        )
+        put!(c.reactor_channel, TestProcessTestSetupsLoadedMsg(ps.id))
+    catch err
+        @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
+    end
+end
+
+function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items)
+    put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Running"))
+    @async try
+        JSONRPC.send(
+            ps.endpoint,
+            TestItemServerProtocol.testserver_run_testitems_batch_request_type,
+            TestItemServerProtocol.RunTestItemsRequestParams(
+                mode = ps.env.mode,
+                coverageRootUris = something(ps.coverage_root_uris, missing),
+                testItems = TestItemServerProtocol.RunTestItem[
+                    TestItemServerProtocol.RunTestItem(
+                        id = i.id,
+                        uri = i.uri,
+                        name = i.label,
+                        packageName = something(i.package_name, missing),
+                        packageUri = something(i.package_uri, missing),
+                        useDefaultUsings = i.option_default_imports,
+                        testSetups = i.test_setups,
+                        line = i.code_line,
+                        column = i.code_column,
+                        code = i.code,
+                    ) for i in items
+                ],
+            )
+        )
+    catch err
+        @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
+    end
+end
+
+function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids::Vector{String})
+    @async try
+        JSONRPC.send(
+            ps.endpoint,
+            TestItemServerProtocol.testserver_steal_testitems_request_type,
+            TestItemServerProtocol.StealTestItemsRequestParams(
+                testItemIds = testitem_ids
+            )
+        )
+    catch err
+        @error "Error stealing testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+    end
+end
+
+function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_hash)
+    @async try
+        needs_restart = false
+
+        if new_env_hash != ps.test_env_content_hash
+            needs_restart = true
+        else
+            res = JSONRPC.send(ps.endpoint, TestItemServerProtocol.testserver_revise_request_type, nothing)
+            if res == "success"
+                needs_restart = false
+            elseif res == "failed"
+                needs_restart = true
+            else
+                error("Unexpected revise result: $res")
+            end
+        end
+
+        ps.test_env_content_hash = new_env_hash
+        put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, needs_restart))
+    catch err
+        @error "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
+        try put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, true)) catch end
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Test-run helper functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function _remove_from_proc_queue!(tr::TestRunState, proc_id::String, testitem_id::String)
+    if haskey(tr.testitem_ids_by_proc, proc_id)
+        idx = findfirst(isequal(testitem_id), tr.testitem_ids_by_proc[proc_id])
+        if idx !== nothing
+            deleteat!(tr.testitem_ids_by_proc[proc_id], idx)
+        end
+    end
+end
+
+function _item_env(item::TestItemDetail, tr::TestRunState)
+    profile = tr.profiles[1]
+    return TestEnvironment(
+        item.project_uri,
+        item.package_uri,
+        item.package_name,
+        profile.julia_cmd,
+        profile.julia_args,
+        profile.julia_num_threads,
+        profile.mode,
+        profile.julia_env
+    )
+end
+
+"""Get items for an env that haven't been assigned to a process yet."""
+function _get_unchunked_items(tr::TestRunState, env::TestEnvironment)
+    assigned = Set{String}()
+    for (_, ids) in tr.testitem_ids_by_proc
+        union!(assigned, ids)
+    end
+    items = [id for (id, item) in tr.remaining_items if _item_env(item, tr) == env && id ∉ assigned]
+    return items
+end
+
+function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc_id::String)
+    if !haskey(tr.testitem_ids_by_proc, finished_proc_id)
+        return
+    end
+
+    remaining_for_proc = length(tr.testitem_ids_by_proc[finished_proc_id])
+    pending_stolen = length(get(tr.stolen_ids_by_proc, finished_proc_id, String[]))
+
+    if remaining_for_proc > 0 || pending_stolen > 0
+        return
+    end
+
+    # This process has nothing left to do — try to steal
+    if !haskey(c.test_processes, finished_proc_id)
+        return
+    end
+    ps = c.test_processes[finished_proc_id]
+
+    # Find the env for this process in the testrun
+    proc_env = nothing
+    procs_in_same_env = String[]
+    if tr.procs !== nothing
+        for (env, pids) in pairs(tr.procs)
+            if finished_proc_id in pids
+                proc_env = env
+                procs_in_same_env = pids
+                break
+            end
+        end
+    end
+
+    if proc_env === nothing
+        # Process not in any env for this testrun, return to pool
+        put!(c.reactor_channel, ReturnToPoolMsg(finished_proc_id, ps.env))
+        return
+    end
+
+    @info "Test process '$(finished_proc_id)' finished all assigned test items (package '$(proc_env.package_name)')"
+
+    # Find best steal candidate
+    best_candidate_id = nothing
+    best_count = 1  # only steal if victim has >1 items
+
+    for candidate_pid in procs_in_same_env
+        n = length(get(tr.testitem_ids_by_proc, candidate_pid, String[]))
+        if n > best_count
+            best_count = n
+            best_candidate_id = candidate_pid
+        end
+    end
+
+    if best_candidate_id === nothing
+        @info "No work to steal, returning test process '$(finished_proc_id)' to pool"
+        put!(c.reactor_channel, ReturnToPoolMsg(finished_proc_id, ps.env))
+        return
+    end
+
+    # Steal half the items from the end of the victim's queue
+    victim_ids = tr.testitem_ids_by_proc[best_candidate_id]
+    steal_range = (div(length(victim_ids), 2, RoundUp) + 1):lastindex(victim_ids)
+    testitem_ids_to_steal = victim_ids[steal_range]
+
+    @info "Stealing $(length(testitem_ids_to_steal)) test item(s) from process '$(best_candidate_id)' to process '$(finished_proc_id)'"
+
+    deleteat!(victim_ids, steal_range)
+    append!(get!(tr.testitem_ids_by_proc, finished_proc_id, String[]), testitem_ids_to_steal)
+
+    if best_candidate_id in tr.items_dispatched_to_procs
+        for id in testitem_ids_to_steal
+            push!(get!(tr.stolen_ids_by_proc, best_candidate_id, String[]), id)
+        end
+
+        if haskey(c.test_processes, best_candidate_id)
+            victim_ps = c.test_processes[best_candidate_id]
+            _send_steal!(c, victim_ps, testitem_ids_to_steal)
+        end
+    end
+
+    # Send items to thief
+    items_to_run = [tr.remaining_items[id] for id in testitem_ids_to_steal if haskey(tr.remaining_items, id)]
+    _send_run_testitems!(c, ps, items_to_run)
+    return
+end
+
+function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return
+    end
+
+    remaining = length(tr.remaining_items)
+    pending_stolen = sum(length, values(tr.stolen_ids_by_proc); init=0)
+
+    if remaining == 0 && pending_stolen == 0
+        coverage_results = missing
+        if !isempty(tr.coverage)
+            coverage_results = map(CoverageTools.merge_coverage_counts(tr.coverage)) do i
+                TestItemControllerProtocol.FileCoverage(
+                    uri = filepath2uri(i.filename),
+                    coverage = i.coverage
+                )
+            end
+        end
+
+        @info "Test run '$(tr.id)' completed"
+        transition!(tr.fsm, TestRunCompleted; reason="all items done")
+
+        # Return all processes to pool
+        if tr.procs !== nothing
+            for pid in Iterators.flatten(values(tr.procs))
+                if haskey(c.test_processes, pid)
+                    ps = c.test_processes[pid]
+                    put!(c.reactor_channel, ReturnToPoolMsg(pid, ps.env))
+                end
+            end
+        end
+
+        try put!(tr.completion_channel, coverage_results) catch end
+    else
+        @debug "$(remaining) test item(s) remaining ($(pending_stolen) pending stolen confirmation(s))"
+    end
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# execute_testrun — thin wrapper, no callbacks in signature
+# ═══════════════════════════════════════════════════════════════════════════════
 
 function execute_testrun(
     controller::TestItemController,
@@ -342,13 +1459,6 @@ function execute_testrun(
     profiles::Vector{TestProfile},
     test_items::Vector{TestItemDetail},
     test_setups::Vector{TestSetupDetail},
-    testitem_started_callback,
-    testitem_passed_callback,
-    testitem_failed_callback,
-    testitem_errored_callback,
-    testitem_skipped_callback,
-    append_output_callback,
-    attach_debugger_callback,
     token)
 
     @assert length(profiles) == 1 "Currently one must pass one test profile"
@@ -357,87 +1467,33 @@ function execute_testrun(
 
         @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s)"
 
-        state = :created
-        function set_state!(new_state::Symbol; reason=nothing)
-            old_state = state
-            state = new_state
-            @debug "Test run state transition" testrun_id from=old_state to=new_state reason
-            return state
-        end
+        # Build TestRunState
+        tr = TestRunState(
+            testrun_id,
+            profiles,
+            test_items,
+            [
+                TestSetupDetail(i.package_uri, i.name, i.kind, i.uri, i.line, i.column, i.code)
+                for i in test_setups
+            ];
+            token = token
+        )
 
-        testrun_cs = token === nothing ? CancellationTokens.CancellationTokenSource() : CancellationTokens.CancellationTokenSource(token)
-        testrun_token = CancellationTokens.get_token(testrun_cs)
-
-        testrun_msg_queue = Channel{Any}(Inf)
-        our_procs = nothing
-
+        # Register cancellation bridge
         testrun_cancel_registration = nothing
         if token !== nothing
-            @debug "Registering test run cancellation callback" testrun_id
             testrun_cancel_registration = CancellationTokens.register(token) do
-                @debug "Cancellation token fired for test run" testrun_id
-                try put!(testrun_msg_queue, (source=:token, msg=(event=:cancelled,))) catch end
+                try put!(controller.reactor_channel, TestRunCancelledMsg(testrun_id)) catch end
             end
         end
 
+        # Filter invalid items (no package)
         valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
         test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
 
-        stolen_testitem_ids_by_proc_id = Dict{String,Vector{String}}()
-
-        testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
-
-        env_content_hash_by_env = Dict{TestEnvironment,String}()
-
-        @debug "Prepared test run inputs" testrun_id valid_items=length(valid_test_items) invalid_items=length(test_items_without_package) profile_count=length(profiles)
-
-        for i in values(valid_test_items)
-            te = TestEnvironment(
-                i.project_uri,
-                i.package_uri,
-                i.package_name,
-                profiles[1].julia_cmd,
-                profiles[1].julia_args,
-                profiles[1].julia_num_threads,
-                profiles[1].mode,
-                profiles[1].julia_env
-            )
-
-            testitems = get!(testitem_ids_by_env, te) do
-                String[]
-            end
-
-            push!(testitems, i.id)
-
-            if haskey(env_content_hash_by_env, te)
-                if env_content_hash_by_env[te] != i.env_content_hash
-                    error("This is invalid.")
-                end
-            else
-                env_content_hash_by_env[te] = i.env_content_hash
-            end
-        end
-
-        testitem_ids_by_env_chunked = Dict{TestEnvironment,Vector{Vector{String}}}()
-
-        for (k,v) in pairs(testitem_ids_by_env)
-            as_share = length(v)/length(valid_test_items)
-
-            n_procs = max(1, min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items)))
-
-            chunks =  makechunks(v, n_procs)
-
-            testitem_ids_by_env_chunked[k] = chunks
-            @debug "Chunked test items for environment" testrun_id package_name=k.package_name item_count=length(v) proc_count=n_procs chunk_sizes=length.(chunks)
-        end
-
-        # Finally, we send error notifications for all test items that didn't have a package
-        if !isempty(test_items_without_package)
-            @info "$(length(test_items_without_package)) test item(s) are not inside a Julia package and will be skipped"
-        end
-
+        # Report items without package as failed
         for i in test_items_without_package
-            testitem_failed_callback(
+            controller.callbacks.on_testitem_failed(
                 testrun_id,
                 i.id,
                 TestItemControllerProtocol.TestMessage[
@@ -452,399 +1508,77 @@ function execute_testrun(
                 ],
                 missing
             )
+            delete!(tr.remaining_items, i.id)
         end
 
         if isempty(valid_test_items)
-            @warn "No valid test items to run" total_items=length(test_items) items_without_package=length(test_items_without_package)
+            @warn "No valid test items to run"
+            if testrun_cancel_registration !== nothing
+                try close(testrun_cancel_registration) catch end
+            end
             return missing
         end
 
-        set_state!(:procs_requested; reason=:requested_processes)
+        # Build environment mapping
+        testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
+        env_content_hash_by_env = Dict{TestEnvironment,Union{Nothing,String}}()
 
-        @debug "Requesting processes from controller" testrun_id requested=Dict(k.package_name=>length(v) for (k,v) in testitem_ids_by_env_chunked)
+        for i in values(valid_test_items)
+            te = _item_env(i, tr)
+            push!(get!(testitem_ids_by_env, te) do; String[]; end, i.id)
+            env_content_hash_by_env[te] = i.env_content_hash
+        end
+
+        # Calculate process counts
+        proc_count_by_env = Dict{TestEnvironment,Int}()
+        for (k, v) in pairs(testitem_ids_by_env)
+            as_share = length(v) / length(valid_test_items)
+            n_procs = max(1, min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items)))
+            proc_count_by_env[k] = n_procs
+        end
+
+        # Register test run with controller
+        controller.test_runs[testrun_id] = tr
+        transition!(tr.fsm, TestRunWaitingForProcs; reason="requesting procs")
+
+        # Build server-side test setup details
+        server_test_setups = [
+            TestItemServerProtocol.TestsetupDetails(
+                packageUri = i.package_uri,
+                name = i.name,
+                kind = i.kind,
+                uri = i.uri,
+                line = i.line,
+                column = i.column,
+                code = i.code
+            ) for i in test_setups
+        ]
+
+        # Request processes
         put!(
-            controller.msg_channel,
-            (
-                event = :get_procs_for_testrun,
-                testrun_id = testrun_id,
-                proc_count_by_env = Dict(k=>length(v) for (k,v) in testitem_ids_by_env_chunked),
-                env_content_hash_by_env = env_content_hash_by_env,
-                test_setups = [
-                    TestItemServerProtocol.TestsetupDetails(
-                        packageUri = i.package_uri,
-                        name = i.name,
-                        kind = i.kind,
-                        uri = i.uri,
-                        line = i.line,
-                        column = i.column,
-                        code = i.code
-                    ) for i in test_setups],
-                coverage_root_uris = profiles[1].coverage_root_uris,
-                log_level = profiles[1].log_level,
-                testrun_msg_queue = testrun_msg_queue,
-                testrun_token = testrun_token
+            controller.reactor_channel,
+            GetProcsForTestRunMsg(
+                testrun_id,
+                proc_count_by_env,
+                env_content_hash_by_env,
+                server_test_setups,
+                profiles[1].coverage_root_uris,
+                profiles[1].log_level
             )
         )
 
-        testitem_ids_by_proc = Dict{String,Vector{String}}()
+        # Wait for completion
+        coverage_results = take!(tr.completion_channel)
 
-        items_dispatched_to_procs = Set{String}()
+        @debug "Leaving execute_testrun" testrun_id
 
-        coverage_results = missing
-
-        local_coverage = CoverageTools.FileCoverage[]
-
-        processes_that_are_ready = Set{@NamedTuple{id::String,channel::Channel}}()
-
-        cancelled = false
-
-        while true
-            msg = take!(testrun_msg_queue)
-            @debug "Msg $(msg.source):$(msg.msg.event)" msg
-
-            if msg.source==:controller
-                if msg.msg.event==:procs_acquired
-                    state == :procs_requested || error("Invalid state transition from $state")
-                    our_procs = msg.msg.procs
-
-                    if cancelled
-                        # Cancellation arrived before process acquisition completed.
-                        # Return all processes to pool immediately.
-                        @info "Returning $(sum(length, values(our_procs), init=0)) process(es) to pool after deferred cancellation"
-                        for proc in Iterators.flatten(values(our_procs))
-                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
-                        end
-                        break
-                    end
-
-                    @info "Acquired $(sum(length, values(our_procs), init=0)) test process(es) for test run"
-
-                    # Now distribute test items over test processes
-                    for (k,v) in pairs(our_procs)
-                        for proc in v
-                            stolen_testitem_ids_by_proc_id[proc.id] = String[]
-                            testitem_ids_by_proc[proc.id] = pop!(testitem_ids_by_env_chunked[k])
-                            @info "Assigned $(length(testitem_ids_by_proc[proc.id])) test item(s) to process '$(proc.id)' (package '$(k.package_name)')"
-                        end
-                    end
-
-                    set_state!(:all_procs_acquired; reason=:procs_acquired)
-
-                    for i in processes_that_are_ready
-                        @debug "Dispatching buffered test items to ready process" testrun_id process_id=i.id assigned=length(testitem_ids_by_proc[i.id])
-                        put!(i.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[i.id])))
-                        push!(items_dispatched_to_procs, i.id)
-                    end
-                else
-                    error("Unknown message")
-                end
-            elseif msg.source==:testprocess
-                if cancelled
-                    # Ignore stale process messages after cancellation
-                    @debug "Ignoring stale testprocess message after cancellation" testrun_id event=msg.msg.event
-                    continue
-                end
-
-                if msg.msg.event == :ready_to_run_testitems
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    if state == :all_procs_acquired
-                        @info "Test process '$(msg.msg.id)' is ready, dispatching $(length(testitem_ids_by_proc[msg.msg.id])) test item(s)"
-                        put!(msg.msg.channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_by_proc[msg.msg.id])))
-                        push!(items_dispatched_to_procs, msg.msg.id)
-                    else
-                        @info "Test process '$(msg.msg.id)' is ready, waiting for process acquisition to finish"
-                        @debug "Process ready before acquisition finished, buffering" testrun_id process_id=msg.msg.id
-                        push!(processes_that_are_ready, (id=msg.msg.id, channel=msg.msg.channel))
-                    end
-                elseif msg.msg.event == :attach_debugger
-                    @debug "Forwarding debugger attach request" testrun_id process_id=msg.msg.id debug_pipe_name=msg.msg.debug_pipe_name
-                    attach_debugger_callback(testrun_id, msg.msg.debug_pipe_name)
-                elseif msg.msg.event == :precompile_done
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    @info "Test process '$(msg.msg.testprocess_id)' completed precompilation for package '$(msg.msg.env.package_name)'"
-
-                    for i in our_procs[msg.msg.env]
-                        if i.id !== msg.msg.testprocess_id
-                            @debug "Notifying peer process that precompile completed" testrun_id source_process_id=msg.msg.testprocess_id target_process_id=i.id
-                            put!(i.msg_channel, (;event=:precompile_by_other_proc_done))
-                        end
-                    end
-                elseif msg.msg.event == :started
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    @debug "Test item started" testrun_id testitem_id=msg.msg.testitemid
-
-                    testitem_started_callback(
-                        testrun_id,
-                        msg.msg.testitemid
-                    )
-                elseif msg.msg.event == :append_output
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    @debug "Appending test item output" testrun_id testitem_id=msg.msg.testitemid ncodeunits=ncodeunits(msg.msg.output)
-
-                    append_output_callback(
-                        testrun_id,
-                        msg.msg.testitemid,
-                        msg.msg.output
-                    )
-                elseif msg.msg.event in (:passed, :failed, :errored, :skipped_stolen)
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    stolen_idx = findfirst(isequal(msg.msg.testitemid), stolen_testitem_ids_by_proc_id[msg.msg.test_process_id])
-
-                    if msg.msg.event == :skipped_stolen
-                        @debug "Victim confirmed skipped stolen test item" testrun_id process_id=msg.msg.test_process_id testitem_id=msg.msg.testitemid
-                        # Victim confirms skip — clean up stolen tracking
-                        if stolen_idx !== nothing
-                            deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
-                        end
-                    else
-                        if stolen_idx !== nothing
-                            # Victim completed item before steal took effect — clean up stolen tracking
-                            deleteat!(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id], stolen_idx)
-                        end
-
-                        if haskey(valid_test_items, msg.msg.testitemid)
-                            @debug "Processing first terminal result for test item" testrun_id process_id=msg.msg.test_process_id event=msg.msg.event testitem_id=msg.msg.testitemid remaining_before=length(valid_test_items)
-                            # First result for this item — process it
-                            delete!(valid_test_items, msg.msg.testitemid)
-                            proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
-                            if proc_idx !== nothing
-                                deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
-                            end
-
-                            if msg.msg.event == :passed
-                                testitem_passed_callback(
-                                    testrun_id,
-                                    msg.msg.testitemid,
-                                    msg.msg.duration
-                                )
-
-                                if msg.msg.coverage !== missing
-                                    append!(local_coverage, map(i->CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.msg.coverage))
-                                end
-                            elseif msg.msg.event == :failed
-                                testitem_failed_callback(
-                                    testrun_id,
-                                    msg.msg.testitemid,
-                                    TestItemControllerProtocol.TestMessage[
-                                        TestItemControllerProtocol.TestMessage(
-                                            message = i.message,
-                                            expectedOutput = i.expectedOutput,
-                                            actualOutput = i.actualOutput,
-                                            uri = i.location.uri,
-                                            line = i.location.position.line,
-                                            column = i.location.position.character
-                                        ) for i in msg.msg.messages
-                                    ],
-                                    missing
-                                )
-                            elseif msg.msg.event == :errored
-                                testitem_errored_callback(
-                                    testrun_id,
-                                    msg.msg.testitemid,
-                                    TestItemControllerProtocol.TestMessage[
-                                        TestItemControllerProtocol.TestMessage(
-                                            message = i.message,
-                                            expectedOutput = missing,
-                                            actualOutput = missing,
-                                            uri = i.location.uri,
-                                            line = i.location.position.line,
-                                            column = i.location.position.character
-                                        ) for i in msg.msg.messages
-                                    ],
-                                    missing
-                                )
-                            end
-                        else
-                            @debug "Ignoring duplicate terminal result for test item" testrun_id process_id=msg.msg.test_process_id event=msg.msg.event testitem_id=msg.msg.testitemid
-                            # Duplicate — thief reported result for item victim already handled.
-                            # Clean up the thief's tracking.
-                            proc_idx = findfirst(isequal(msg.msg.testitemid), testitem_ids_by_proc[msg.msg.test_process_id])
-                            if proc_idx !== nothing
-                                deleteat!(testitem_ids_by_proc[msg.msg.test_process_id], proc_idx)
-                            end
-                        end
-                    end
-
-                    # Stealing logic
-                    if length(testitem_ids_by_proc[msg.msg.test_process_id]) == 0 && length(stolen_testitem_ids_by_proc_id[msg.msg.test_process_id]) == 0
-                        # First we find the test process instance and test env
-                        test_process = nothing
-                        test_processes_in_same_env = nothing
-                        test_env = nothing
-                        for (k,v) in pairs(our_procs)
-                            ix = findfirst(i->i.id == msg.msg.test_process_id, v)
-                            if ix!==nothing
-                                test_process = v[ix]
-                                test_processes_in_same_env = v
-                                test_env = k
-                                break
-                            end
-                        end
-
-                        if test_process === nothing
-                            error("This should never happen")
-                        end
-
-                        @info "Test process '$(test_process.id)' finished all assigned test items (package '$(test_env.package_name)')"
-
-                        test_process_to_steal_from = nothing
-                        # Now we look through all test processes with the same env that have more than 1 pending test item to run
-                        for candidate_test_process in test_processes_in_same_env
-                            n_test_items_still_pending = length(testitem_ids_by_proc[candidate_test_process.id])
-                            # We only steal from this one if there are more than 1 test item pending
-                            # AND if we haven't identified another process yet that has more pending test items
-                            if n_test_items_still_pending > 1 && (test_process_to_steal_from===nothing || length(testitem_ids_by_proc[test_process_to_steal_from.id]) < n_test_items_still_pending)
-                                test_process_to_steal_from = candidate_test_process
-                            end
-                        end
-
-                        if test_process_to_steal_from === nothing
-                            @info "No work to steal, returning test process '$(test_process.id)' to pool"
-                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=test_process))
-                        else
-
-                            # we just steal half the items at the end of the queue
-
-                            # TODO HERE
-                            testitem_ids_from_which_we_steal = testitem_ids_by_proc[test_process_to_steal_from.id]
-                            steal_range = (div(length(testitem_ids_from_which_we_steal), 2, RoundUp) + 1):lastindex(testitem_ids_from_which_we_steal)
-
-                            testitem_ids_to_steal = testitem_ids_from_which_we_steal[steal_range]
-
-                            @info "Stealing $(length(testitem_ids_to_steal)) test item(s) from process '$(test_process_to_steal_from.id)' to process '$(test_process.id)'"
-
-                            deleteat!(testitem_ids_from_which_we_steal, steal_range)
-
-                            append!(testitem_ids_by_proc[test_process.id], testitem_ids_to_steal)
-
-                            if test_process_to_steal_from.id in items_dispatched_to_procs
-                                for i in testitem_ids_to_steal
-                                    push!(stolen_testitem_ids_by_proc_id[test_process_to_steal_from.id], i)
-                                end
-
-                                @debug "Queueing steal redistribution" testrun_id from_process_id=test_process_to_steal_from.id to_process_id=test_process.id stolen=length(testitem_ids_to_steal)
-                                put!(test_process_to_steal_from.msg_channel, (event=:steal, testitem_ids=testitem_ids_to_steal))
-                            else
-                                @info "Victim process '$(test_process_to_steal_from.id)' not yet dispatched, reassigning items without steal tracking"
-                            end
-
-                            put!(test_process.msg_channel, (event=:run_testitems, testitems=collect(valid_test_items[i] for i in testitem_ids_to_steal)))
-                            # run_testitems(test_process, stolen_test_items, msg.msg.testrunid, missing, controller)
-                        end
-                    end
-
-                    # Are we done with the testrun?
-                    remaining = length(valid_test_items)
-                    pending_stolen = sum(length.(values(stolen_testitem_ids_by_proc_id)))
-                    if remaining==0 && pending_stolen==0
-
-                        if !isempty(local_coverage)
-                            coverage_results = map(CoverageTools.merge_coverage_counts(local_coverage)) do i
-                                TestItemControllerProtocol.FileCoverage(
-                                    uri = filepath2uri(i.filename),
-                                    coverage = i.coverage
-                                )
-                            end
-                        end
-
-                        @info "Test run '$(testrun_id)' completed"
-
-                        break
-                    else
-                        @info "$(remaining) test item(s) remaining ($(pending_stolen) pending stolen confirmation(s))"
-                    end
-                elseif msg.msg.event == :test_process_terminated
-                    state in (:procs_requested, :all_procs_acquired) || error("Invalid state transition from $state")
-
-                    # Resolve all remaining test items assigned to this process as skipped
-                    terminated_proc_id = msg.msg.id
-                    @info "Test process '$(terminated_proc_id)' terminated during test run, skipping its $(haskey(testitem_ids_by_proc, terminated_proc_id) ? length(testitem_ids_by_proc[terminated_proc_id]) : 0) remaining test item(s)"
-                    if haskey(testitem_ids_by_proc, terminated_proc_id)
-                        for testitem_id in testitem_ids_by_proc[terminated_proc_id]
-                            if haskey(valid_test_items, testitem_id)
-                                delete!(valid_test_items, testitem_id)
-                                testitem_skipped_callback(testrun_id, testitem_id)
-                            end
-                        end
-                        empty!(testitem_ids_by_proc[terminated_proc_id])
-                    end
-                    if haskey(stolen_testitem_ids_by_proc_id, terminated_proc_id)
-                        empty!(stolen_testitem_ids_by_proc_id[terminated_proc_id])
-                    end
-
-                    # Remove process from our_procs
-                    if our_procs !== nothing
-                        for (env, procs) in pairs(our_procs)
-                            idx = findfirst(p -> p.id == terminated_proc_id, procs)
-                            if idx !== nothing
-                                deleteat!(procs, idx)
-                                break
-                            end
-                        end
-                    end
-
-                    # Forward to controller — it owns controller.testprocesses
-                    put!(controller.msg_channel, (event=:test_process_terminated, id=terminated_proc_id))
-
-                    # Check if the test run is now complete
-                    if length(valid_test_items) == 0 && sum(length.(values(stolen_testitem_ids_by_proc_id))) == 0
-                        if !isempty(local_coverage)
-                            coverage_results = map(CoverageTools.merge_coverage_counts(local_coverage)) do i
-                                TestItemControllerProtocol.FileCoverage(
-                                    uri = filepath2uri(i.filename),
-                                    coverage = i.coverage
-                                )
-                            end
-                        end
-
-                        @info "Test run '$(testrun_id)' completed"
-                        break
-                    end
-                else
-                    error("Unknown message")
-                end
-            elseif msg.source==:token
-                if msg.msg.event == :cancelled
-                    @info "Test run cancelled, skipping $(length(valid_test_items)) remaining test item(s)"
-                    @debug "Cancelling test run state machine" testrun_id remaining=length(valid_test_items)
-
-                    CancellationTokens.cancel(testrun_cs)
-
-                    # Report all remaining test items as skipped
-                    for (id, item) in valid_test_items
-                        testitem_skipped_callback(testrun_id, id)
-                    end
-
-                    # Return all processes to the pool
-                    if our_procs !== nothing
-                        for proc in Iterators.flatten(values(our_procs))
-                            @debug "Returning process to pool after cancellation" testrun_id process_id=proc.id
-                            put!(controller.msg_channel, (event=:return_to_pool, testprocess=proc))
-                        end
-                        break
-                    else
-                        # Processes not yet acquired — defer pool return until :procs_acquired arrives
-                        @debug "Cancellation before process acquisition, deferring cleanup" testrun_id
-                        cancelled = true
-                        continue
-                    end
-                else
-                    error("Unknown message")
-                end
-            else
-                error("Unknown source")
-            end
-        end
-
-        @debug "Leaving test run event loop" testrun_id state remaining=length(valid_test_items)
         if testrun_cancel_registration !== nothing
             try close(testrun_cancel_registration) catch end
         end
+
+        # Clean up test run state
+        delete!(controller.test_runs, testrun_id)
+
         return coverage_results
-        end
+    end
 end

@@ -12,11 +12,100 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
 
         endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out, err_handler)
 
-        return new{ERR_HANDLER}(
-            err_handler,
-            endpoint,
-            TestItemController(err_handler; error_handler_file=error_handler_file, crash_reporting_pipename=crash_reporting_pipename)
+        jr = new{ERR_HANDLER}(err_handler, endpoint)
+
+        callbacks = ControllerCallbacks(
+            on_testitem_started = (testrun_id, testitem_id) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeTestItemStarted,
+                TestItemControllerProtocol.TestItemStartedParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id
+                )
+            ),
+            on_testitem_passed = (testrun_id, testitem_id, duration) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeTestItemPassed,
+                TestItemControllerProtocol.TestItemPassedParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id,
+                    duration=duration
+                )
+            ),
+            on_testitem_failed = (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeTestItemFailed,
+                TestItemControllerProtocol.TestItemFailedParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id,
+                    messages=messages,
+                    duration=duration
+                )
+            ),
+            on_testitem_errored = (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeTestItemErrored,
+                TestItemControllerProtocol.TestItemErroredParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id,
+                    messages=messages,
+                    duration=duration
+                )
+            ),
+            on_testitem_skipped = (testrun_id, testitem_id) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeTestItemSkipped,
+                (testRunId=testrun_id, testItemId=testitem_id)
+            ),
+            on_append_output = (testrun_id, testitem_id, output) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notficiationTypeAppendOutput,
+                TestItemControllerProtocol.AppendOutputParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id,
+                    output=output
+                )
+            ),
+            on_attach_debugger = (testrun_id, debug_pipename) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notificationTypeLaunchDebugger,
+                (;
+                    debugPipeName = debug_pipename,
+                    testRunId = testrun_id
+                )
+            ),
+            on_process_created = (id, package_name, package_uri, project_uri, coverage, env) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessCreated,
+                TestItemControllerProtocol.TestProcessCreatedParams(
+                    id = id,
+                    packageName = package_name,
+                    packageUri = something(package_uri, missing),
+                    projectUri = something(project_uri, missing),
+                    coverage = coverage,
+                    env = env
+                )
+            ),
+            on_process_terminated = id -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessTerminated,
+                (;id = id)
+            ),
+            on_process_status_changed = (id, status) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessStatusChanged,
+                TestItemControllerProtocol.TestProcessStatusChangedParams(id = id, status = status)
+            ),
+            on_process_output = (id, output) -> JSONRPC.send(
+                jr.endpoint,
+                TestItemControllerProtocol.notificationTypeTestProcessOutput,
+                TestItemControllerProtocol.TestProcessOutputParams(id = id, output = output)
+            ),
         )
+
+        jr.controller = TestItemController(callbacks, err_handler; error_handler_file=error_handler_file, crash_reporting_pipename=crash_reporting_pipename)
+
+        return jr
     end
 end
 
@@ -54,7 +143,8 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.column,
                 i.code,
                 i.codeLine,
-                i.codeColumn
+                i.codeColumn,
+                coalesce(i.timeout, nothing)
             )
             for i in params.testItems
         ],
@@ -69,72 +159,6 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.code
             ) for i in params.testSetups
         ],
-        # testitem_started_callback,
-        (testrun_id, testitem_id) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeTestItemStarted,
-            TestItemControllerProtocol.TestItemStartedParams(
-                testRunId=testrun_id,
-                testItemId=testitem_id
-            )
-        ),
-        # testitem_passed_callback
-        (testrun_id, testitem_id, duration) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeTestItemPassed,
-            TestItemControllerProtocol.TestItemPassedParams(
-                testRunId=testrun_id,
-                testItemId=testitem_id,
-                duration=duration
-            )
-        ),
-        # testitem_failed_callback
-        (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeTestItemFailed,
-            TestItemControllerProtocol.TestItemFailedParams(
-                    testRunId=testrun_id,
-                    testItemId=testitem_id,
-                    messages = messages,
-                    duration=duration
-            )
-        ),
-        # testitem_errored_callback
-        (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeTestItemErrored,
-            TestItemControllerProtocol.TestItemErroredParams(
-                    testRunId=testrun_id,
-                    testItemId=testitem_id,
-                    messages = messages,
-                    duration=duration
-            )
-        ),
-        # testitem_skipped_callback
-        (testrun_id, testitem_id) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeTestItemSkipped,
-            (testRunId=testrun_id, testItemId=testitem_id)
-        ),
-        # append_output_callback
-        (testrun_id, testitem_id, output) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notficiationTypeAppendOutput,
-            TestItemControllerProtocol.AppendOutputParams(
-                testRunId=testrun_id,
-                testItemId=testitem_id,
-                output=output
-            )
-        ),
-        # attach_debugger_callback
-        (testrun_id, debug_pipename) -> JSONRPC.send(
-            jr_controller.endpoint,
-            TestItemControllerProtocol.notificationTypeLaunchDebugger,
-            (;
-                debugPipeName = debug_pipename,
-                testRunId = testrun_id
-            )
-        ),
         token
     )
 
@@ -182,46 +206,5 @@ function Base.run(jr_controller::JSONRPCTestItemController)
         end
     end
 
-    run(
-        jr_controller.controller,
-        (id, package_name, package_uri, project_uri, coverage, env) -> begin
-            @debug "Forwarding test process created notification" id package_name coverage
-            JSONRPC.send(
-                jr_controller.endpoint,
-                TestItemControllerProtocol.notificationTypeTestProcessCreated,
-                TestItemControllerProtocol.TestProcessCreatedParams(
-                    id = id,
-                    packageName = package_name,
-                    packageUri = something(package_uri, missing),
-                    projectUri = something(project_uri, missing),
-                    coverage = coverage,
-                    env = env
-                )
-            )
-        end,
-        id -> begin
-            @debug "Forwarding test process terminated notification" id
-            JSONRPC.send(
-                jr_controller.endpoint,
-                TestItemControllerProtocol.notificationTypeTestProcessTerminated,
-                (;id = id)
-            )
-        end,
-        (id, status) -> begin
-            @debug "Forwarding test process status notification" id status
-            JSONRPC.send(
-                jr_controller.endpoint,
-                TestItemControllerProtocol.notificationTypeTestProcessStatusChanged,
-                TestItemControllerProtocol.TestProcessStatusChangedParams(id = id, status = status)
-            )
-        end,
-        (id, output) -> begin
-            @debug "Forwarding test process output notification" id ncodeunits=ncodeunits(output)
-            JSONRPC.send(
-                jr_controller.endpoint,
-                TestItemControllerProtocol.notificationTypeTestProcessOutput,
-                TestItemControllerProtocol.TestProcessOutputParams(id = id, output = output)
-            )
-        end
-    )
+    run(jr_controller.controller)
 end

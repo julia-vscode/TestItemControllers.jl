@@ -1,7 +1,7 @@
 @testmodule TestHelpers begin
     using JuliaWorkspaces
     using TestItemControllers: TestProfile, TestItemDetail, TestSetupDetail, TestItemController,
-        execute_testrun, shutdown, TestItemControllerProtocol
+        execute_testrun, shutdown, TestItemControllerProtocol, ControllerCallbacks
 
     const TESTDATA_DIR = normpath(joinpath(@__DIR__, "..", "testdata"))
 
@@ -33,7 +33,8 @@
                     pos[2],                                    # column
                     ti.code,                                  # code
                     code_pos[1],                               # code_line
-                    code_pos[2]                                # code_column
+                    code_pos[2],                               # code_column
+                    nothing                                    # timeout
                 ))
             end
 
@@ -74,10 +75,6 @@
     end
 
     function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug)
-        controller = TestItemController(log_level=log_level)
-        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris, log_level=log_level)
-        testrun_id = string(UUIDs.uuid4())
-
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -90,16 +87,28 @@
             push!(process_events, e)
         end
 
+        callbacks = ControllerCallbacks(
+            on_testitem_started = (run_id, item_id) -> push_event!((event=:started, testrun_id=run_id, testitem_id=item_id)),
+            on_testitem_passed = (run_id, item_id, duration) -> push_event!((event=:passed, testrun_id=run_id, testitem_id=item_id, duration=duration)),
+            on_testitem_failed = (run_id, item_id, messages, duration) -> push_event!((event=:failed, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
+            on_testitem_errored = (run_id, item_id, messages, duration) -> push_event!((event=:errored, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
+            on_testitem_skipped = (run_id, item_id) -> push_event!((event=:skipped, testrun_id=run_id, testitem_id=item_id)),
+            on_append_output = (run_id, item_id, output) -> nothing,
+            on_attach_debugger = (run_id, pipe_name) -> nothing,
+            on_process_created = (id, pkg_name, pkg_uri, proj_uri, coverage, env) -> push_process_event!((
+                event=:process_created, id=id, package_name=pkg_name
+            )),
+            on_process_terminated = id -> push_process_event!((event=:process_terminated, id=id)),
+            on_process_status_changed = (id, status) -> push_process_event!((event=:status_changed, id=id, status=status)),
+            on_process_output = (id, output) -> nothing,
+        )
+
+        controller = TestItemController(callbacks; log_level=log_level)
+        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris, log_level=log_level)
+        testrun_id = string(UUIDs.uuid4())
+
         controller_task = @async try
-            run(
-                controller,
-                (id, pkg_name, pkg_uri, proj_uri, coverage, env) -> push_process_event!((
-                    event=:process_created, id=id, package_name=pkg_name
-                )),
-                id -> push_process_event!((event=:process_terminated, id=id)),
-                (id, status) -> push_process_event!((event=:status_changed, id=id, status=status)),
-                (id, output) -> nothing  # suppress output
-            )
+            run(controller)
         catch err
             @error "Controller run error" exception=(err, catch_backtrace())
         end
@@ -112,20 +121,6 @@
                 [profile],
                 items,
                 setups,
-                # testitem_started
-                (run_id, item_id) -> push_event!((event=:started, testrun_id=run_id, testitem_id=item_id)),
-                # testitem_passed
-                (run_id, item_id, duration) -> push_event!((event=:passed, testrun_id=run_id, testitem_id=item_id, duration=duration)),
-                # testitem_failed
-                (run_id, item_id, messages, duration) -> push_event!((event=:failed, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
-                # testitem_errored
-                (run_id, item_id, messages, duration) -> push_event!((event=:errored, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
-                # testitem_skipped
-                (run_id, item_id) -> push_event!((event=:skipped, testrun_id=run_id, testitem_id=item_id)),
-                # append_output
-                (run_id, item_id, output) -> nothing,
-                # attach_debugger
-                (run_id, pipe_name) -> nothing,
                 nothing  # token
             )
         catch err

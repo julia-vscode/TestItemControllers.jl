@@ -31,6 +31,7 @@ end
     code::String
     codeLine::Int
     codeColumn::Int
+    timeout::Union{Missing,Float64}
 end
 
 @dict_readable struct TestSetupDetail <: JSONRPC.Outbound
