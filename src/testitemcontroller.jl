@@ -1065,9 +1065,16 @@ function handle!(c::TestItemController, msg::TestProcessReviseResultMsg)
         transition!(ps.fsm, ProcessStarting; reason="restart_after_revise")
         _launch_julia_process!(c, ps)
     else
-        @debug "Revise completed without restart" testprocess_id=msg.testprocess_id
-        transition!(ps.fsm, ProcessActivatingEnv; reason="revise_success")
-        _activate_env!(c, ps)
+        @debug "Revise completed without restart, skipping activation" testprocess_id=msg.testprocess_id
+        transition!(ps.fsm, ProcessConfiguringTestRun; reason="revise_success")
+
+        if ps.env.mode == "Debug" && ps.testrun_id !== nothing
+            @debug "Requesting debugger attachment" testprocess_id=msg.testprocess_id debug_pipe_name=ps.debug_pipe_name
+            put!(c.reactor_channel, AttachDebuggerMsg(ps.testrun_id, ps.debug_pipe_name))
+        end
+
+        @debug "Configuring test run on process" testprocess_id=msg.testprocess_id mode=ps.env.mode
+        _configure_testrun!(c, ps)
     end
 
     return false
