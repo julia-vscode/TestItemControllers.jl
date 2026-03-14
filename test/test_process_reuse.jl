@@ -78,6 +78,7 @@
     # Process count should still be 1 — the process was reused
     @test second_run_process_count == 1
 
+    @info "[test] Process reuse: shutting down"
     shutdown(controller)
-    wait(controller_task)
+    TestHelpers.timed_wait(controller_task, 120; label="process-reuse-controller")
 end

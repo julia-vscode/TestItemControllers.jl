@@ -5,6 +5,30 @@
 
     const TESTDATA_DIR = normpath(joinpath(@__DIR__, "..", "testdata"))
 
+    """
+        timed_wait(task, timeout_secs; label="task")
+
+    Wait for `task` to finish, but error with a descriptive message if it
+    takes longer than `timeout_secs`. This prevents tests from hanging
+    indefinitely.
+    """
+    function timed_wait(task::Task, timeout_secs::Real; label::String="task")
+        timer = Timer(timeout_secs)
+        @async begin
+            wait(timer)
+            if !istaskdone(task)
+                @error "HANG DETECTED: $(label) did not complete within $(timeout_secs)s"
+                # Print stack traces of all tasks to aid debugging
+                try
+                    Base.throwto(task, ErrorException("Test timed out: $(label) exceeded $(timeout_secs)s"))
+                catch
+                end
+            end
+        end
+        wait(task)
+        close(timer)
+    end
+
     function discover_test_items(pkg_path::String)
         jw = workspace_from_folders([pkg_path])
         td_dict = get_test_items(jw)

@@ -49,10 +49,12 @@
     CancellationTokens.cancel(cs)
 
     # Wait for testrun to complete
-    wait(testrun_task)
+    @info "[test] Cancel running test run: waiting for testrun"
+    TestHelpers.timed_wait(testrun_task, 120; label="cancel-testrun")
 
+    @info "[test] Cancel running test run: shutting down"
     shutdown(controller)
-    wait(controller_task)
+    TestHelpers.timed_wait(controller_task, 120; label="cancel-controller")
 
     # After cancellation, items should be skipped or already completed
     completed = filter(e -> e.event in (:passed, :failed, :errored, :skipped), events)
