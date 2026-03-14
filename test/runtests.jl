@@ -1,4 +1,4 @@
-using TestItemRunner, Logging
+using TestItemRunner
 
 ENV["JULIA_DEBUG"] = "TestItemControllers"
 
