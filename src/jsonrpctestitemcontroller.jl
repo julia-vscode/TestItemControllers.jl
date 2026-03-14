@@ -62,7 +62,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                 TestItemControllerProtocol.notficiationTypeAppendOutput,
                 TestItemControllerProtocol.AppendOutputParams(
                     testRunId=testrun_id,
-                    testItemId=testitem_id,
+                    testItemId=something(testitem_id, missing),
                     output=output
                 )
             ),
