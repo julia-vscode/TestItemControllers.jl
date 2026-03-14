@@ -293,10 +293,10 @@ end
     @test_throws ErrorException transition!(fsm2, TestRunCompleted)
     @test state(fsm2) == TestRunCreated
 
-    # TestRunCreated → TestRunCancelled is not valid
+    # TestRunCreated → TestRunCancelled is valid (early cancellation)
     fsm3 = testrun_fsm("run-invalid-3")
-    @test_throws ErrorException transition!(fsm3, TestRunCancelled)
-    @test state(fsm3) == TestRunCreated
+    transition!(fsm3, TestRunCancelled)
+    @test state(fsm3) == TestRunCancelled
 
     # TestRunCompleted is terminal (no valid transitions)
     fsm4 = testrun_fsm("run-invalid-4")

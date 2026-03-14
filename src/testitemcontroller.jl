@@ -486,6 +486,10 @@ function handle!(c::TestItemController, msg::PrecompileDoneMsg)
     end
     tr = c.test_runs[msg.testrun_id]
 
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
     @info "Test process '$(msg.testprocess_id)' completed precompilation for package '$(msg.env.package_name)'"
     push!(c.precompiled_envs, msg.env)
 
@@ -1014,6 +1018,13 @@ function handle!(c::TestItemController, msg::TestProcessActivatedMsg)
         return false
     end
 
+    if ps.testrun_id !== nothing && haskey(c.test_runs, ps.testrun_id) && state(c.test_runs[ps.testrun_id].fsm) in (TestRunCancelled, TestRunCompleted)
+        @debug "Test run already ended, returning process to idle" testprocess_id=msg.testprocess_id
+        transition!(ps.fsm, ProcessDead; reason="testrun_cancelled_during_activation")
+        put!(c.reactor_channel, ReturnToPoolMsg(msg.testprocess_id, ps.env))
+        return false
+    end
+
     transition!(ps.fsm, ProcessConfiguringTestRun; reason="testprocess_activated")
 
     if ps.env.mode == "Debug" && ps.testrun_id !== nothing
@@ -1035,6 +1046,13 @@ function handle!(c::TestItemController, msg::TestProcessTestSetupsLoadedMsg)
 
     if state(ps.fsm) != ProcessConfiguringTestRun
         @debug "Ignoring TestProcessTestSetupsLoadedMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    if ps.testrun_id !== nothing && haskey(c.test_runs, ps.testrun_id) && state(c.test_runs[ps.testrun_id].fsm) in (TestRunCancelled, TestRunCompleted)
+        @debug "Test run already ended, returning process to idle" testprocess_id=msg.testprocess_id
+        transition!(ps.fsm, ProcessDead; reason="testrun_cancelled_during_configuration")
+        put!(c.reactor_channel, ReturnToPoolMsg(msg.testprocess_id, ps.env))
         return false
     end
 

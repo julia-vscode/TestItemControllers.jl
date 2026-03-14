@@ -122,7 +122,7 @@ end
 """Create a test-run-phase FSM starting in `TestRunCreated`."""
 function testrun_fsm(id::String)
     transitions = Dict{TestRunPhase,Set{TestRunPhase}}(
-        TestRunCreated         => Set([TestRunWaitingForProcs]),
+        TestRunCreated         => Set([TestRunWaitingForProcs, TestRunCancelled]),
         TestRunWaitingForProcs => Set([TestRunProcsAcquired, TestRunCancelled]),
         TestRunProcsAcquired   => Set([TestRunRunning, TestRunCancelled]),
         TestRunRunning         => Set([TestRunCancelled, TestRunCompleted]),
