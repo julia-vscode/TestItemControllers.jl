@@ -1141,14 +1141,6 @@ end
 function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
     @debug "Shutting down test process" testprocess_id=ps.id
     CancellationTokens.cancel(ps.cs)
-    ep = ps.endpoint
-    if ep !== nothing
-        @async try
-            JSONRPC.send(ep, TestItemServerProtocol.testserver_shutdown_request_type, nothing)
-        catch err
-            @error "Error sending shutdown request" testprocess_id=ps.id exception=(err, catch_backtrace())
-        end
-    end
     _kill_julia_process!(ps)
     if ps.testrun_id !== nothing
         put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id))
@@ -1379,8 +1371,13 @@ function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc
     end
 
     if best_candidate_id === nothing
-        @info "No work to steal, returning test process '$(finished_proc_id)' to pool"
-        put!(c.reactor_channel, ReturnToPoolMsg(finished_proc_id, ps.env))
+        # Only return to pool here if the testrun won't be completing immediately
+        # (which would return all procs). This avoids duplicate ReturnToPoolMsg.
+        pending_stolen = sum(length, values(tr.stolen_ids_by_proc); init=0)
+        if !isempty(tr.remaining_items) || pending_stolen > 0
+            @info "No work to steal, returning test process '$(finished_proc_id)' to pool"
+            put!(c.reactor_channel, ReturnToPoolMsg(finished_proc_id, ps.env))
+        end
         return
     end
 

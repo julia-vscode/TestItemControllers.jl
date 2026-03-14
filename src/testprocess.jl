@@ -212,7 +212,11 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
         wait(jl_process)
         if !connection_established[]
             captured_output = lock(raw_output_lock) do; join(raw_output_chunks); end
-            @error "Test process exited before connecting" testprocess_id exitcode=jl_process.exitcode pipe_name captured_output
+            if CancellationTokens.is_cancellation_requested(token)
+                @debug "Test process exited before connecting (cancellation requested)" testprocess_id exitcode=jl_process.exitcode pipe_name
+            else
+                @error "Test process exited before connecting" testprocess_id exitcode=jl_process.exitcode pipe_name captured_output
+            end
             try close(server) catch end
         end
     catch
