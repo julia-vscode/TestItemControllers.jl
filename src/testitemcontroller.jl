@@ -1,6 +1,6 @@
-mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
+mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing},CB<:ControllerCallbacks}
     err_handler::ERR_HANDLER
-    callbacks::ControllerCallbacks
+    callbacks::CB
 
     reactor_channel::Channel{ReactorMessage}
 
@@ -26,13 +26,13 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing}}
     controller_fsm::FSM{ControllerPhase}
 
     function TestItemController(
-        callbacks::ControllerCallbacks,
+        callbacks::CB,
         err_handler::ERR_HANDLER=nothing;
         error_handler_file=nothing,
         crash_reporting_pipename=nothing,
-        log_level::Symbol=:Info) where {ERR_HANDLER<:Union{Function,Nothing}}
+        log_level::Symbol=:Info) where {ERR_HANDLER<:Union{Function,Nothing},CB<:ControllerCallbacks}
 
-        return new{ERR_HANDLER}(
+        return new{ERR_HANDLER,CB}(
             err_handler,
             callbacks,
             Channel{ReactorMessage}(Inf),
