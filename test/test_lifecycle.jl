@@ -16,20 +16,28 @@
 end
 
 @testitem "Terminate specific test process" begin
-    tic = TestItemController(log_level=:Debug)
-
-    controller_finished = Channel(1)
+    using TestItemControllers: ControllerCallbacks
 
     process_events = NamedTuple[]
 
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id) -> nothing,
+        on_append_output = (run_id, item_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+        on_process_created = (id, pkg_name, pkg_uri, proj_uri, coverage, env) -> push!(process_events, (event=:created, id=id)),
+        on_process_terminated = id -> push!(process_events, (event=:terminated, id=id)),
+    )
+
+    tic = TestItemController(callbacks; log_level=:Debug)
+
+    controller_finished = Channel(1)
+
     @async try
-        run(
-            tic,
-            (id, pkg_name, pkg_uri, proj_uri, coverage, env) -> push!(process_events, (event=:created, id=id)),
-            id -> push!(process_events, (event=:terminated, id=id)),
-            (id, status) -> nothing,
-            (id, output) -> nothing
-        )
+        run(tic)
         put!(controller_finished, true)
     catch err
         Base.display_error(err, catch_backtrace())

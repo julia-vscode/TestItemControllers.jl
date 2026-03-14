@@ -17,3 +17,22 @@ end
 @testitem "erroring test" begin
     error("intentional error")
 end
+
+@testitem "output test" begin
+    println("hello from output test")
+    println("second line of output")
+    @test true
+end
+
+@testitem "slow test" begin
+    sleep(60)
+    @test true
+end
+
+@testitem "exit crash" begin
+    exit()
+end
+
+@testitem "abort crash" begin
+    ccall(:abort, Cvoid, ())
+end

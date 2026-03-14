@@ -27,9 +27,15 @@ include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
 
 include("testenvironment.jl")
+include("datatypes.jl")
+
+include("fsm.jl")
+include("messages.jl")
+include("callbacks.jl")
+include("state.jl")
+
 include("testprocess.jl")
 include("testitemcontroller.jl")
 include("jsonrpctestitemcontroller.jl")
-
 
 end # module TestItemControllers

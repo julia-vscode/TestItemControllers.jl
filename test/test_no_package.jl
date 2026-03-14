@@ -14,7 +14,8 @@
         String[],   # test_setups
         1, 1,       # line, column
         "@test true",
-        2, 5        # code_line, code_column
+        2, 5,       # code_line, code_column
+        nothing     # timeout
     )
 
     result = TestHelpers.run_testrun([item], TestSetupDetail[])

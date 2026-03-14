@@ -1,18 +1,16 @@
 @info "Julia test item process precompiling"
 
-import Pkg
+# Activate the version-specific environment. We use Base.ACTIVE_PROJECT[]
+# (available since Julia 1.0) instead of Pkg.activate, because Pkg may not
+# be available in the default environment on Julia 1.12+ (no implicit Pkg
+# in empty projects). Fall back to Pkg.activate for safety.
 version_specific_env_path = joinpath(@__DIR__, "../environments", "v$(VERSION.major).$(VERSION.minor)")
-if isdir(version_specific_env_path)
-    @static if VERSION >= v"1.6"
-        Pkg.activate(version_specific_env_path, io=devnull)
+let env_path = isdir(version_specific_env_path) ? version_specific_env_path : joinpath(@__DIR__, "../environments", "fallback")
+    if isdefined(Base, :ACTIVE_PROJECT)
+        Base.ACTIVE_PROJECT[] = env_path
     else
-        Pkg.activate(version_specific_env_path)
-    end
-else
-    @static if VERSION >= v"1.6"
-        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"), io=devnull)
-    else
-        Pkg.activate(joinpath(@__DIR__, "../environments", "fallback"))
+        import Pkg
+        Pkg.activate(env_path)
     end
 end
 
