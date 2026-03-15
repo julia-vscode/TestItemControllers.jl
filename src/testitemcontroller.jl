@@ -790,8 +790,12 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
 
     @info "Test process '$(terminated_proc_id)' terminated during test run, redistributing $(length(items_to_redistribute)) remaining item(s)"
 
-    # Track consecutive crashes — prevent infinite crash→redistribute→crash loops
-    tr.process_crash_count += 1
+    # Track crashes — but only count towards the retry limit when we must
+    # create a NEW replacement process (an actual retry cycle).  Simultaneous
+    # startup failures from a transient OS error shouldn't each consume a
+    # retry, because only the fallback "launch new process" path is a real
+    # retry.  The counter is incremented below, after we determine whether a
+    # live recipient exists.
     max_crash_retries = 3
     @debug "Process crash count for test run" testrun_id=msg.testrun_id crash_count=tr.process_crash_count max_retries=max_crash_retries
 
@@ -823,10 +827,12 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
     end
 
     # Try to find another process in the same env that's part of this testrun
+    # Require the candidate has a live endpoint (not just a non-dead FSM state),
+    # since a process in ProcessStarting may have endpoint === nothing.
     recipient_pid = nothing
     if tr.procs !== nothing && haskey(tr.procs, terminated_env)
         for pid in tr.procs[terminated_env]
-            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead
+            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead && c.test_processes[pid].endpoint !== nothing
                 recipient_pid = pid
                 break
             end
@@ -842,6 +848,35 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
         _send_run_testitems!(c, ps, items_to_run)
     else
+        # Creating a new replacement process counts as a real retry cycle.
+        tr.process_crash_count += 1
+        if tr.process_crash_count > max_crash_retries
+            @error "Test run exceeded maximum process crash retries ($(max_crash_retries)), failing remaining items" testrun_id=msg.testrun_id crash_count=tr.process_crash_count remaining_items=length(items_to_redistribute)
+            for testitem_id in items_to_redistribute
+                if haskey(tr.remaining_items, testitem_id)
+                    item = tr.remaining_items[testitem_id]
+                    delete!(tr.remaining_items, testitem_id)
+                    c.callbacks.on_testitem_errored(
+                        msg.testrun_id,
+                        testitem_id,
+                        TestItemControllerProtocol.TestMessage[
+                            TestItemControllerProtocol.TestMessage(
+                                message = "Test process crashed $(tr.process_crash_count) time(s) for test item '$(item.label)'. Giving up after $(max_crash_retries) retries.",
+                                expectedOutput = missing,
+                                actualOutput = missing,
+                                uri = item.uri,
+                                line = item.line,
+                                column = item.column
+                            )
+                        ],
+                        missing
+                    )
+                end
+            end
+            _check_testrun_complete!(c, tr)
+            return false
+        end
+
         # Create a new process for the redistributed items
         env = terminated_env
         profile = tr.profiles[1]
@@ -1219,6 +1254,11 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
 end
 
 function _configure_testrun!(c::TestItemController, ps::TestProcessState)
+    if ps.endpoint === nothing
+        @warn "Cannot configure test run: process has no endpoint" testprocess_id=ps.id
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
+        return
+    end
     @async try
         JSONRPC.send(
             ps.endpoint,
@@ -1238,6 +1278,11 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
 end
 
 function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items)
+    if ps.endpoint === nothing
+        @warn "Cannot send test items: process has no endpoint" testprocess_id=ps.id
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
+        return
+    end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Running"))
     @async try
         JSONRPC.send(
@@ -1269,6 +1314,10 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
 end
 
 function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids::Vector{String})
+    if ps.endpoint === nothing
+        @warn "Cannot steal test items: process has no endpoint" testprocess_id=ps.id
+        return
+    end
     @async try
         JSONRPC.send(
             ps.endpoint,
@@ -1283,6 +1332,11 @@ function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids:
 end
 
 function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_hash)
+    if ps.endpoint === nothing
+        @warn "Cannot revise: process has no endpoint" testprocess_id=ps.id
+        try put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, true)) catch end
+        return
+    end
     @async try
         needs_restart = false
 
