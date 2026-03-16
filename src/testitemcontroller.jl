@@ -1539,7 +1539,7 @@ function execute_testrun(
 
     @assert length(profiles) == 1 "Currently one must pass one test profile"
 
-    Base.ScopedValues.@with logging_node => "testrun_$(testrun_id[1:5])" begin
+    Base.ScopedValues.@with logging_node => "testrun_$(testrun_id)" begin
 
         @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s)"
 
