@@ -54,7 +54,8 @@ module LoweredCodeUtils
         using ..JuliaInterpreter: codelocation, is_global_ref, is_global_ref_egal, is_quotenode_egal, is_return,
                         lookup, lookup_return, linetable, moduleof, next_until!, nstatements, pc_expr,
                         step_expr!, whichtt, extract_method_table
-        using ..Compiler: Compiler as CC
+        import ..Compiler
+        const CC = Compiler
 
         include("../../../packages/LoweredCodeUtils/src/packagedef.jl")
     elseif VERSION >= v"1.6.0"
