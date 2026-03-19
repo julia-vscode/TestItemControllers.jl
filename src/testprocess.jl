@@ -244,11 +244,9 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
     close(server_cancel_reg)
     @info "Connection established" testprocess_id
 
-    endpoint = JSONRPC.JSONRPCEndpoint(socket, socket, (err, bt) -> begin
-        @error "JSONRPC endpoint error in test process" testprocess_id exception=(err, bt)
-    end)
+    endpoint = JSONRPC.JSONRPCEndpoint(socket, socket)
 
-    run(endpoint)
+    JSONRPC.start(endpoint)
 
     # Post-connection watchdog: if the OS process exits (e.g. stack overflow crash),
     # close the socket to unblock the JSONRPC layer promptly.

@@ -96,7 +96,7 @@ end
 
     # Set up client endpoint
     client_endpoint = JSONRPC.JSONRPCEndpoint(client_sock, client_sock)
-    run(client_endpoint)
+    JSONRPC.start(client_endpoint)
 
     # Collect notifications from the server
     notifications, notif_lock, stop_collector, collector_task = JSONRPCHelpers.collect_notifications(client_endpoint)
@@ -225,7 +225,7 @@ end
     end
 
     client_endpoint = JSONRPC.JSONRPCEndpoint(client_sock, client_sock)
-    run(client_endpoint)
+    JSONRPC.start(client_endpoint)
 
     notifications, notif_lock, stop_collector, collector_task = JSONRPCHelpers.collect_notifications(client_endpoint)
 
@@ -315,7 +315,7 @@ end
     end
 
     client_endpoint = JSONRPC.JSONRPCEndpoint(client_sock, client_sock)
-    run(client_endpoint)
+    JSONRPC.start(client_endpoint)
 
     notifications, notif_lock, stop_collector, collector_task = JSONRPCHelpers.collect_notifications(client_endpoint)
 
@@ -411,7 +411,7 @@ end
     end
 
     client_endpoint = JSONRPC.JSONRPCEndpoint(client_sock, client_sock)
-    run(client_endpoint)
+    JSONRPC.start(client_endpoint)
 
     notifications, notif_lock, stop_collector, collector_task = JSONRPCHelpers.collect_notifications(client_endpoint)
 
@@ -493,7 +493,7 @@ end
     end
 
     client_endpoint = JSONRPC.JSONRPCEndpoint(client_sock, client_sock)
-    run(client_endpoint)
+    JSONRPC.start(client_endpoint)
 
     notifications, notif_lock, stop_collector, collector_task = JSONRPCHelpers.collect_notifications(client_endpoint)
 

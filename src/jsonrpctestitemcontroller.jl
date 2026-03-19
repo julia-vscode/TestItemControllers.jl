@@ -10,7 +10,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
         error_handler_file=nothing,
         crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
 
-        endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out, err_handler)
+        endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out)
 
         jr = new{ERR_HANDLER}(err_handler, endpoint)
 
@@ -178,7 +178,7 @@ end
 
 function Base.run(jr_controller::JSONRPCTestItemController)
     @debug "Starting JSON-RPC controller endpoint"
-    run(jr_controller.endpoint)
+    JSONRPC.start(jr_controller.endpoint)
 
     @async try
         while true

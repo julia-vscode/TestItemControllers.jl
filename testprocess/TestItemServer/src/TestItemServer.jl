@@ -731,7 +731,7 @@ function serve(pipename, debug_pipename, error_handler=nothing)
 
     endpoint = JSONRPC.JSONRPCEndpoint(conn, conn)
 
-    run(endpoint)
+    JSONRPC.start(endpoint)
 
     state = TestProcessState(endpoint, error_handler)
 
