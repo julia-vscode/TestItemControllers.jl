@@ -169,7 +169,7 @@ end
     close(socket1)
 end
 
-@testitem "token read_transport_layer: cancellation returns nothing" setup=[NamedPipes] begin
+@testitem "token read_transport_layer: cancellation throws OperationCanceledException" setup=[NamedPipes] begin
     using CancellationTokens
 
     socket1, socket2 = NamedPipes.get_named_pipe()
@@ -190,7 +190,7 @@ end
     CancellationTokens.cancel(src)
 
     result = take!(result_ch)
-    @test result === :nothing_returned
+    @test result isa CancellationTokens.OperationCanceledException
 
     close(socket1)
     close(socket2)
@@ -900,10 +900,10 @@ end
     close(client)
 
     result = take!(result_ch)
-    # Should be JSONRPCError about endpoint closed (no TransportError since close is clean)
+    # Should be TransportError about endpoint closed (no transport error since close is clean)
     @test result isa Exception
-    if result isa JSONRPC.JSONRPCError
-        @test occursin("closed", lowercase(result.msg)) || occursin("cancelled", lowercase(result.msg))
+    if result isa JSONRPC.TransportError
+        @test occursin("closed", lowercase(result.msg))
     end
 
     close(socket2)
@@ -929,11 +929,13 @@ end
 end
 
 @testitem "read_transport_layer rethrow: invalid Content-Length (non-token)" begin
+    using CancellationTokens
     # Trigger the rethrow(err) path in read_transport_layer(stream) by
     # writing a Content-Length header with a non-integer value.
     # parse(Int, " abc") throws ArgumentError, which is not IOError → rethrow
     buf = IOBuffer("Content-Length: abc\r\n\r\n")
-    @test_throws ArgumentError JSONRPC.read_transport_layer(buf)
+    token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    @test_throws ArgumentError JSONRPC.read_transport_layer(buf, token)
 end
 
 @testitem "read_transport_layer rethrow: invalid Content-Length (token)" setup=[NamedPipes] begin
@@ -967,9 +969,9 @@ end
 end
 
 @testitem "send_request: transport-level error (response missing result and error)" setup=[NamedPipes] begin
-    using JSON
+    using JSON, CancellationTokens
     # When a response has neither "result" nor "error", send_request should
-    # throw JSONRPCError with "ERROR AT THE TRANSPORT LEVEL"
+    # throw TransportError with "Received malformed message"
     socket1, socket2 = NamedPipes.get_named_pipe()
     ep = JSONRPC.JSONRPCEndpoint(socket1, socket1)
     JSONRPC.start(ep)
@@ -987,7 +989,8 @@ end
 
     # Wait a bit for the request to be sent, then read it from the remote side
     sleep(0.2)
-    msg_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    msg_str = JSONRPC.read_transport_layer(socket2, _token)
     @test msg_str !== nothing
     msg = JSON.parse(msg_str)
     id = msg["id"]
@@ -998,9 +1001,8 @@ end
     sleep(0.3)
 
     wait(t)
-    @test err_ref[] isa JSONRPC.JSONRPCError
-    @test err_ref[].code == 0
-    @test occursin("TRANSPORT LEVEL", err_ref[].msg)
+    @test err_ref[] isa JSONRPC.TransportError
+    @test occursin("malformed", lowercase(err_ref[].msg))
     close(ep)
     close(socket2)
 end
@@ -1029,8 +1031,7 @@ end
         err_ref[] = e
     end
 
-    @test err_ref[] isa JSONRPC.JSONRPCError
-    @test occursin("cancelled by token", err_ref[].msg)
+    @test err_ref[] isa CancellationTokens.OperationCanceledException
     close(ep)
     close(socket2)
 end
@@ -1092,7 +1093,7 @@ end
 end
 
 @testitem "send_request: error response from server" setup=[NamedPipes] begin
-    using JSON
+    using JSON, CancellationTokens
     # Exercise the response["error"] branch of send_request with error data
     socket1, socket2 = NamedPipes.get_named_pipe()
     ep = JSONRPC.JSONRPCEndpoint(socket1, socket1)
@@ -1108,7 +1109,8 @@ end
     end
 
     sleep(0.2)
-    msg_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    msg_str = JSONRPC.read_transport_layer(socket2, _token)
     msg = JSON.parse(msg_str)
     id = msg["id"]
 
@@ -1153,7 +1155,8 @@ end
 
     # Read the original request
     sleep(0.2)
-    msg_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    msg_str = JSONRPC.read_transport_layer(socket2, _token)
     msg = JSON.parse(msg_str)
     id = msg["id"]
 
@@ -1162,7 +1165,7 @@ end
     sleep(0.2)
 
     # Read the $/cancelRequest notification
-    cancel_str = JSONRPC.read_transport_layer(socket2)
+    cancel_str = JSONRPC.read_transport_layer(socket2, _token)
     @test cancel_str !== nothing
     cancel_msg = JSON.parse(cancel_str)
     @test cancel_msg["method"] == "\$/cancelRequest"
@@ -1201,7 +1204,8 @@ end
 
     # Wait for request to be sent
     sleep(0.2)
-    msg_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    msg_str = JSONRPC.read_transport_layer(socket2, _token)
     @test msg_str !== nothing
 
     # Cancel the client token — send_request should throw
@@ -1209,8 +1213,7 @@ end
     sleep(0.3)
 
     wait(t)
-    @test err_ref[] isa JSONRPC.JSONRPCError
-    @test occursin("cancelled by client", err_ref[].msg)
+    @test err_ref[] isa CancellationTokens.OperationCanceledException
     close(ep)
     close(socket2)
 end
@@ -1226,6 +1229,7 @@ end
 
     # Manually register a cancellation source for a fake request id
     cs = CancellationTokens.CancellationTokenSource()
+    cst = CancellationTokens.get_token(cs)
     ep.cancellation_sources["test-id-999"] = cs
 
     # Send a $/cancelRequest from the remote side
@@ -1238,7 +1242,7 @@ end
     sleep(0.3)
 
     # The cancellation source should have been cancelled
-    @test CancellationTokens.is_cancellation_requested(cs)
+    @test CancellationTokens.is_cancellation_requested(cst)
 
     close(ep)
     close(socket2)
@@ -1316,13 +1320,14 @@ end
     sleep(0.3)
 
     # Read the responses from the remote side
-    resp1_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    resp1_str = JSONRPC.read_transport_layer(socket2, _token)
     @test resp1_str !== nothing
     resp1 = JSON.parse(resp1_str)
     @test resp1["id"] == "r1"
     @test resp1["result"]["sum"] == 2
 
-    resp2_str = JSONRPC.read_transport_layer(socket2)
+    resp2_str = JSONRPC.read_transport_layer(socket2, _token)
     @test resp2_str !== nothing
     resp2 = JSON.parse(resp2_str)
     @test resp2["id"] == "r2"
@@ -1388,7 +1393,8 @@ end
     end
 
     sleep(0.2)
-    msg_str = JSONRPC.read_transport_layer(socket2)
+    _token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource())
+    msg_str = JSONRPC.read_transport_layer(socket2, _token)
     msg = JSON.parse(msg_str)
     id = msg["id"]
 
