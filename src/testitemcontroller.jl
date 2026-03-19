@@ -56,14 +56,7 @@ end
 
 function terminate_test_process(controller::TestItemController, id::String)
     @debug "Terminating test process" id
-    if haskey(controller.test_processes, id)
-        ps = controller.test_processes[id]
-        _kill_julia_process!(ps)
-        if ps.testrun_id !== nothing
-            put!(controller.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, id))
-        end
-        put!(controller.reactor_channel, TestProcessTerminatedMsg(id))
-    end
+    put!(controller.reactor_channel, TerminateTestProcessMsg(id))
     return nothing
 end
 
@@ -76,15 +69,8 @@ function Base.run(controller::TestItemController)
         msg = take!(controller.reactor_channel)
         @debug "Reactor msg" msg_type=typeof(msg).name.name
 
-        try
-            should_stop = handle!(controller, msg)
-            should_stop === true && break
-        catch err
-            @error "Error handling reactor message" msg_type=typeof(msg).name.name exception=(err, catch_backtrace())
-            if controller.err_handler !== nothing
-                controller.err_handler(err, catch_backtrace())
-            end
-        end
+        should_stop = handle!(controller, msg)
+        should_stop === true && break
     end
 end
 
@@ -138,6 +124,29 @@ function handle!(c::TestItemController, msg::TestProcessOutputMsg)
     return false
 end
 
+function handle!(c::TestItemController, msg::TerminateTestProcessMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        @debug "Ignoring terminate request for unknown process" testprocess_id=msg.testprocess_id
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) == ProcessDead
+        @debug "Ignoring terminate request for already-dead process" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    @info "Terminating test process '$(msg.testprocess_id)' via request"
+    _kill_julia_process!(ps)
+
+    if ps.testrun_id !== nothing
+        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, msg.testprocess_id))
+    end
+    put!(c.reactor_channel, TestProcessTerminatedMsg(msg.testprocess_id))
+
+    return false
+end
+
 function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
     @info "Test process '$(msg.testprocess_id)' terminated"
 
@@ -155,10 +164,10 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
         end
 
         delete!(c.test_processes, msg.testprocess_id)
-    end
 
-    if c.callbacks.on_process_terminated !== nothing
-        c.callbacks.on_process_terminated(msg.testprocess_id)
+        if c.callbacks.on_process_terminated !== nothing
+            c.callbacks.on_process_terminated(msg.testprocess_id)
+        end
     end
 
     # If shutting down and all processes gone, transition to stopped

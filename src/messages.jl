@@ -146,4 +146,8 @@ struct TestProcessIOErrorMsg <: ReactorMessage
     error_type::Symbol  # :restart or :fatal
 end
 
+struct TerminateTestProcessMsg <: ReactorMessage
+    testprocess_id::String
+end
+
 
