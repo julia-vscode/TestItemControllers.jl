@@ -105,6 +105,42 @@ function Base.showerror(io::IO, ex::JSONRPCError)
     end
 end
 
+"""
+    TransportError
+
+An exception indicating a transport-level failure (broken pipe, parse error, etc.).
+Stored in the endpoint and thrown on the next user-facing API call.
+
+Fields:
+ * msg::String
+ * inner::Union{Nothing,Exception}
+"""
+struct TransportError <: Exception
+    msg::String
+    inner::Union{Nothing,Exception}
+end
+
+function Base.showerror(io::IO, ex::TransportError)
+    print(io, "TransportError: ")
+    print(io, ex.msg)
+    if ex.inner !== nothing
+        print(io, "\n  caused by: ")
+        showerror(io, ex.inner)
+    end
+end
+
+"""
+    EndpointStatus
+
+Enum representing the lifecycle state of a `JSONRPCEndpoint`.
+
+ - `status_idle`    — constructed but `start()` has not been called yet
+ - `status_running` — read/write tasks are active; the endpoint is usable
+ - `status_errored` — a transport-level error occurred; the endpoint is unusable (call `close()` to clean up)
+ - `status_closed`  — fully shut down
+"""
+@enum EndpointStatus status_idle status_running status_errored status_closed
+
 struct Request
     method::String
     params::Union{Nothing,Dict{String,Any},Vector{Any}}
@@ -125,9 +161,9 @@ mutable struct JSONRPCEndpoint{IOIn<:IO,IOOut<:IO,S<:JSON.Serialization}
 
     endpoint_cancellation_source::CancellationTokens.CancellationTokenSource
 
-    err_handler::Union{Nothing,Function}
+    err::Union{Nothing,TransportError}
 
-    status::Symbol
+    status::EndpointStatus
 
     read_task::Union{Nothing,Task}
     write_task::Union{Nothing,Task}
@@ -135,7 +171,7 @@ mutable struct JSONRPCEndpoint{IOIn<:IO,IOOut<:IO,S<:JSON.Serialization}
     serialization::S
 end
 
-JSONRPCEndpoint(pipe_in, pipe_out, err_handler=nothing, serialization::JSON.Serialization=JSON.StandardSerialization()) =
+JSONRPCEndpoint(pipe_in, pipe_out, serialization::JSON.Serialization=JSON.StandardSerialization()) =
     JSONRPCEndpoint(
         pipe_in,
         pipe_out,
@@ -145,8 +181,8 @@ JSONRPCEndpoint(pipe_in, pipe_out, err_handler=nothing, serialization::JSON.Seri
         Dict{Union{String,Int},CancellationTokens.CancellationTokenSource}(),
         Channel{Union{String,Int}}(Inf),
         CancellationTokens.CancellationTokenSource(),
-        err_handler,
-        :idle,
+        nothing,
+        status_idle,
         nothing,
         nothing,
         serialization)
@@ -168,12 +204,21 @@ function read_transport_layer(stream)
             return nothing
         end
         while length(line) > 0
-            h_parts = split(line, ":")
-            header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+            h_parts = split(line, ":", limit=2)
+            if length(h_parts) == 2
+                header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+            end
             line = chomp(readline(stream))
+        end
+        if !haskey(header_dict, "Content-Length")
+            return nothing
         end
         message_length = parse(Int, header_dict["Content-Length"])
         message_str = String(read(stream, message_length))
+        if ncodeunits(message_str) != message_length
+            # Truncated read — the remote process likely crashed mid-write
+            return nothing
+        end
         return message_str
     catch err
         if err isa Base.IOError
@@ -193,12 +238,21 @@ function read_transport_layer(stream::Union{Sockets.TCPSocket,Sockets.PipeEndpoi
             return nothing
         end
         while length(line) > 0
-            h_parts = split(line, ":")
-            header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+            h_parts = split(line, ":", limit=2)
+            if length(h_parts) == 2
+                header_dict[chomp(h_parts[1])] = chomp(h_parts[2])
+            end
             line = chomp(readline(stream, token))
+        end
+        if !haskey(header_dict, "Content-Length")
+            return nothing
         end
         message_length = parse(Int, header_dict["Content-Length"])
         message_str = String(read(stream, message_length))
+        if ncodeunits(message_str) != message_length
+            # Truncated read — the remote process likely crashed mid-write
+            return nothing
+        end
         return message_str
     catch err
         if err isa Base.IOError || err isa CancellationTokens.OperationCanceledException
@@ -209,10 +263,12 @@ function read_transport_layer(stream::Union{Sockets.TCPSocket,Sockets.PipeEndpoi
     end
 end
 
-Base.isopen(x::JSONRPCEndpoint) = x.status != :closed && isopen(x.pipe_in) && isopen(x.pipe_out)
+Base.isopen(x::JSONRPCEndpoint) = x.status == status_running && isopen(x.pipe_in) && isopen(x.pipe_out)
 
-function Base.run(x::JSONRPCEndpoint)
-    x.status == :idle || error("Endpoint is not idle.")
+function start(x::JSONRPCEndpoint)
+    x.status == status_idle || error("Endpoint is not idle.")
+
+    x.status = status_running
 
     x.write_task = @async try
         try
@@ -220,7 +276,7 @@ function Base.run(x::JSONRPCEndpoint)
                 if isopen(x.pipe_out)
                     write_transport_layer(x.pipe_out, msg)
                 else
-                    # TODO Reconsider at some point whether this should be treated as an error.
+                    x.err === nothing && (x.err = TransportError("Write failed: output pipe is closed", nothing))
                     break
                 end
             end
@@ -229,109 +285,121 @@ function Base.run(x::JSONRPCEndpoint)
         end
     catch err
         if err isa Base.IOError
-            # Stream was closed, this is expected during shutdown
-        else
-            bt = catch_backtrace()
-            if x.err_handler !== nothing
-                x.err_handler(err, bt)
-            else
-                Base.display_error(stderr, err, bt)
+            if !CancellationTokens.is_cancellation_requested(x.endpoint_cancellation_source)
+                x.err === nothing && (x.err = TransportError("Write task IOError", err))
             end
+        else
+            x.err === nothing && (x.err = TransportError("Write task failed", err))
         end
     end
 
     endpoint_token = CancellationTokens.get_token(x.endpoint_cancellation_source)
 
     x.read_task = @async try
-        while true
-            # First we delete any cancellation sources that are no longer needed. We do it this way to avoid a lock
-            while isready(x.no_longer_needed_cancellation_sources)
-                no_longer_needed_cs_id = take!(x.no_longer_needed_cancellation_sources)
-                delete!(x.cancellation_sources, no_longer_needed_cs_id)
-            end
+        try
+            while true
+                # First we delete any cancellation sources that are no longer needed. We do it this way to avoid a lock
+                while isready(x.no_longer_needed_cancellation_sources)
+                    no_longer_needed_cs_id = take!(x.no_longer_needed_cancellation_sources)
+                    delete!(x.cancellation_sources, no_longer_needed_cs_id)
+                end
 
-            # Now handle new messages
-            message = if x.pipe_in isa Union{Sockets.TCPSocket,Sockets.PipeEndpoint}
-                read_transport_layer(x.pipe_in, endpoint_token)
-            else
-                read_transport_layer(x.pipe_in)
-            end
-
-            if message === nothing || x.status == :closed
-                break
-            end
-
-            message_dict = JSON.parse(message)
-
-            if haskey(message_dict, "method")
-                method_name = message_dict["method"]
-                params = get(message_dict, "params", nothing)
-                id = get(message_dict, "id", nothing)
-                cancel_source = id === nothing ? nothing : CancellationTokens.CancellationTokenSource()
-                cancel_token = cancel_source === nothing ? nothing : CancellationTokens.get_token(cancel_source)
-
-                if method_name == "\$/cancelRequest"
-                    id_of_cancelled_request = params["id"]
-                    cs = get(x.cancellation_sources, id_of_cancelled_request, nothing) # We might have sent the response already
-                    if cs !== nothing
-                        CancellationTokens.cancel(cs)
-                    end
+                # Now handle new messages
+                message = if x.pipe_in isa Union{Sockets.TCPSocket,Sockets.PipeEndpoint}
+                    read_transport_layer(x.pipe_in, endpoint_token)
                 else
-                    if id !== nothing
-                        x.cancellation_sources[id] = cancel_source
-                    end
+                    read_transport_layer(x.pipe_in)
+                end
 
-                    request = Request(
-                        method_name,
-                        params,
-                        id,
-                        cancel_token
-                    )
+                if message === nothing
+                    break
+                end
 
-                    try
-                        put!(x.in_msg_queue, request)
-                    catch err
-                        if err isa InvalidStateException
-                            break
-                        else
-                            rethrow(err)
+                message_dict = try
+                    JSON.parse(message)
+                catch parse_err
+                    # Corrupted/truncated message (e.g. remote process crashed mid-write).
+                    # Treat as broken pipe and exit the read loop.
+                    x.err === nothing && (x.err = TransportError("Failed to parse message", parse_err))
+                    break
+                end
+
+                if haskey(message_dict, "method")
+                    method_name = message_dict["method"]
+                    params = get(message_dict, "params", nothing)
+                    id = get(message_dict, "id", nothing)
+                    cancel_source = id === nothing ? nothing : CancellationTokens.CancellationTokenSource()
+                    cancel_token = cancel_source === nothing ? nothing : CancellationTokens.get_token(cancel_source)
+
+                    if method_name == "\$/cancelRequest"
+                        id_of_cancelled_request = params["id"]
+                        cs = get(x.cancellation_sources, id_of_cancelled_request, nothing) # We might have sent the response already
+                        if cs !== nothing
+                            CancellationTokens.cancel(cs)
+                        end
+                    else
+                        if id !== nothing
+                            x.cancellation_sources[id] = cancel_source
+                        end
+
+                        request = Request(
+                            method_name,
+                            params,
+                            id,
+                            cancel_token
+                        )
+
+                        try
+                            put!(x.in_msg_queue, request)
+                        catch err
+                            if err isa InvalidStateException
+                                break
+                            else
+                                rethrow(err)
+                            end
                         end
                     end
+                else
+                    # This must be a response
+                    id_of_request = message_dict["id"]
+
+                    channel_for_response = get(x.outstanding_requests, id_of_request, nothing)
+                    if channel_for_response !== nothing
+                        put!(channel_for_response, message_dict)
+                    else
+                        x.err === nothing && (x.err = TransportError("Received response for unknown request id=$id_of_request", nothing))
+                        break
+                    end
                 end
-            else
-                # This must be a response
-                id_of_request = message_dict["id"]
-
-                channel_for_response = x.outstanding_requests[id_of_request]
-                put!(channel_for_response, message_dict)
             end
+        finally
+            # Always clean up the endpoint, whether the loop exited normally or via exception.
+            # This ensures get_next_message() will throw instead of hanging forever.
+            CancellationTokens.cancel(x.endpoint_cancellation_source)
+
+            for cs in values(x.cancellation_sources)
+                CancellationTokens.cancel(cs)
+            end
+
+            isopen(x.in_msg_queue) && close(x.in_msg_queue)
+
+            for i in values(x.outstanding_requests)
+                isopen(i) && close(i)
+            end
+
+            x.status = x.err !== nothing ? status_errored : status_closed
         end
-
-        # Cancel the endpoint source so all internal blocking operations unblock
-        CancellationTokens.cancel(x.endpoint_cancellation_source)
-
-        # Cancel all outstanding cancellation sources for in-progress request handlers
-        for cs in values(x.cancellation_sources)
-            CancellationTokens.cancel(cs)
-        end
-
-        close(x.in_msg_queue)
-
-        for i in values(x.outstanding_requests)
-            close(i)
-        end
-
-        x.status = :closed
     catch err
-        bt = catch_backtrace()
-        if x.err_handler !== nothing
-            x.err_handler(err, bt)
+        if err isa Base.IOError
+            if !CancellationTokens.is_cancellation_requested(x.endpoint_cancellation_source)
+                x.err === nothing && (x.err = TransportError("Read task IOError", err))
+                x.status = status_errored
+            end
         else
-            Base.display_error(stderr, err, bt)
+            x.err === nothing && (x.err = TransportError("Read task failed", err))
+            x.status = status_errored
         end
     end
-
-    x.status = :running
 end
 
 function send_notification(x::JSONRPCEndpoint, method::AbstractString, @nospecialize(params))
@@ -393,9 +461,11 @@ function send_request(x::JSONRPCEndpoint, method::AbstractString, @nospecialize(
                 if client_token !== nothing && CancellationTokens.is_cancellation_requested(client_token)
                     throw(JSONRPCError(INTERNAL_ERROR, "Request cancelled by client", nothing))
                 else
+                    x.err !== nothing && throw(x.err)
                     throw(JSONRPCError(INTERNAL_ERROR, "Endpoint closed before response received", nothing))
                 end
             elseif err isa InvalidStateException
+                x.err !== nothing && throw(x.err)
                 throw(JSONRPCError(INTERNAL_ERROR, "Endpoint closed before response received", nothing))
             else
                 rethrow(err)
@@ -424,15 +494,25 @@ function send_request(x::JSONRPCEndpoint, method::AbstractString, @nospecialize(
     end
 end
 
-function get_next_message(endpoint::JSONRPCEndpoint)
+function get_next_message(endpoint::JSONRPCEndpoint; token::Union{Nothing,CancellationTokens.CancellationToken}=nothing)
     check_dead_endpoint!(endpoint)
 
     endpoint_token = CancellationTokens.get_token(endpoint.endpoint_cancellation_source)
+    wait_token = if token !== nothing
+        combined_source = CancellationTokens.CancellationTokenSource(token, endpoint_token)
+        CancellationTokens.get_token(combined_source)
+    else
+        endpoint_token
+    end
     try
-        msg = take!(endpoint.in_msg_queue, endpoint_token)
+        msg = take!(endpoint.in_msg_queue, wait_token)
         return msg
     catch err
         if err isa CancellationTokens.OperationCanceledException || err isa InvalidStateException
+            if token !== nothing && CancellationTokens.is_cancellation_requested(token) && !CancellationTokens.is_cancellation_requested(endpoint.endpoint_cancellation_source)
+                throw(JSONRPCError(INTERNAL_ERROR, "get_next_message cancelled by token", nothing))
+            end
+            endpoint.err !== nothing && throw(endpoint.err)
             throw(JSONRPCError(INTERNAL_ERROR, "Endpoint closed", nothing))
         else
             rethrow(err)
@@ -448,6 +528,7 @@ function Base.iterate(endpoint::JSONRPCEndpoint, state = nothing)
         return take!(endpoint.in_msg_queue, endpoint_token), nothing
     catch err
         if err isa InvalidStateException || err isa CancellationTokens.OperationCanceledException
+            endpoint.err !== nothing && throw(endpoint.err)
             return nothing
         else
             rethrow(err)
@@ -484,23 +565,35 @@ function send_error_response(endpoint, original_request::Request, @nospecialize(
 end
 
 function Base.close(endpoint::JSONRPCEndpoint)
-    endpoint.status == :closed && return
+    endpoint.status == status_closed && return
 
-    # Cancel the endpoint source first so all internal blocking operations unblock
+    # Signal the read task to stop — this unblocks any cancellation-aware reads
+    # (TCPSocket/PipeEndpoint). For non-cancellation-aware streams, the caller
+    # must close the underlying IO to unblock the read task.
     CancellationTokens.cancel(endpoint.endpoint_cancellation_source)
 
-    # Cancel all outstanding cancellation sources for in-progress request handlers
-    for cs in values(endpoint.cancellation_sources)
-        CancellationTokens.cancel(cs)
+    # Wait for the read task to finish — its finally block is the single authority
+    # for cleaning up shared state (cancellation_sources, in_msg_queue, outstanding_requests, status)
+    if endpoint.read_task !== nothing
+        try
+            wait(endpoint.read_task)
+        catch
+        end
     end
 
-    flush(endpoint)
-
-    endpoint.status = :closed
-    isopen(endpoint.in_msg_queue) && close(endpoint.in_msg_queue)
+    # Now clean up the write side (not touched by the read task's finally block)
     isopen(endpoint.out_msg_queue) && close(endpoint.out_msg_queue)
 
-    fetch(endpoint.write_task)
+    if endpoint.write_task !== nothing
+        try
+            fetch(endpoint.write_task)
+        catch
+        end
+    end
+
+    # Status may be status_errored or status_closed from the read task's finally block.
+    # Always set status_closed here — close() is the final cleanup.
+    endpoint.status = status_closed
 end
 
 function Base.flush(endpoint::JSONRPCEndpoint)
@@ -515,6 +608,7 @@ end
 
 function check_dead_endpoint!(endpoint)
     status = endpoint.status
-    status === :running && return
+    status === status_running && return
+    endpoint.err !== nothing && throw(endpoint.err)
     error("Endpoint is not running, the current state is $(status).")
 end

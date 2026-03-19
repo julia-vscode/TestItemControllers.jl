@@ -11,8 +11,8 @@
     msg_dispatcher = JSONRPC.MsgDispatcher()
     msg_dispatcher[request_type] = (conn, params, token) -> "hello"
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
@@ -61,8 +61,8 @@ end
         "done"
     end
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
@@ -74,7 +74,8 @@ end
 
     # Send a request but don't wait for a response — close the server instead
     client_task = @async try
-        JSONRPC.send(client, request_type, nothing)
+        result = JSONRPC.send(client, request_type, nothing)
+        result
     catch err
         err
     end
@@ -110,8 +111,8 @@ end
         "never"
     end
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
@@ -165,8 +166,8 @@ end
         "cancelled"
     end
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
@@ -226,8 +227,8 @@ end
         "done"
     end
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
@@ -288,8 +289,8 @@ end
         "done"
     end
 
-    run(server)
-    run(client)
+    JSONRPC.start(server)
+    JSONRPC.start(client)
 
     server_task = @async try
         for msg in server
