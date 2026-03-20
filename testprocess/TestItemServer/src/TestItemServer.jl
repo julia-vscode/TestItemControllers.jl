@@ -565,26 +565,39 @@ end
 
 
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token)
-    if params.projectUri===missing
-        @static if VERSION >= v"1.5.0"
-            Pkg.activate(temp=true)
-        else
-            temp_path = mktempdir()
-            Pkg.activate(temp_path)
-        end
+    try
+        if params.projectUri===missing
+            @static if VERSION >= v"1.5.0"
+                Pkg.activate(temp=true)
+            else
+                temp_path = mktempdir()
+                Pkg.activate(temp_path)
+            end
 
-        Pkg.develop(Pkg.PackageSpec(path=uri2filepath(params.packageUri)))
+            Pkg.develop(Pkg.PackageSpec(path=uri2filepath(params.packageUri)))
 
-        TestEnv.activate(params.packageName)
-    else
-        Pkg.activate(uri2filepath(params.projectUri))
-
-        if params.packageName!==missing
             TestEnv.activate(params.packageName)
-        end
-    end
+        else
+            Pkg.activate(uri2filepath(params.projectUri))
 
-    return nothing
+            if params.packageName!==missing
+                TestEnv.activate(params.packageName)
+            end
+        end
+
+        return TestItemServerProtocol.ActivateEnvResult(
+            status = "success",
+            error = missing
+        )
+    catch err
+        bt = catch_backtrace()
+        error_message = format_error_message(err, bt)
+
+        return TestItemServerProtocol.ActivateEnvResult(
+            status = "failed",
+            error = error_message
+        )
+    end
 end
 
 function parse_log_level(s::Symbol)::Base.CoreLogging.LogLevel

@@ -93,6 +93,11 @@ end
     packageName::String
 end
 
+@dict_readable struct ActivateEnvResult <: JSONRPC.Outbound
+    status::String
+    error::Union{Missing,String}
+end
+
 @dict_readable struct StartedParams <: JSONRPC.Outbound
     testItemId::String
 end
@@ -121,7 +126,7 @@ end
 
 # Messages from the controller to the test process
 const testserver_revise_request_type = JSONRPC.RequestType("testserver/revise", Nothing, String)
-const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, Nothing)
+const testserver_activate_env_request_type = JSONRPC.RequestType("activateEnv", ActivateEnvParams, ActivateEnvResult)
 const configure_testrun_request_type = JSONRPC.RequestType("testserver/ConfigureTestRun", ConfigureTestRunRequestParams, Nothing)
 const testserver_run_testitems_batch_request_type = JSONRPC.RequestType("testserver/runTestItems", RunTestItemsRequestParams, Nothing)
 const testserver_steal_testitems_request_type = JSONRPC.RequestType("testserver/stealTestItems", StealTestItemsRequestParams, Nothing)

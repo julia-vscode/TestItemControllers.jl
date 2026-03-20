@@ -1164,6 +1164,130 @@ function handle!(c::TestItemController, msg::TestProcessReviseResultMsg)
     return false
 end
 
+function handle!(c::TestItemController, msg::ActivationFailedMsg)
+    if !haskey(c.test_processes, msg.testprocess_id)
+        return false
+    end
+    ps = c.test_processes[msg.testprocess_id]
+
+    if state(ps.fsm) != ProcessActivatingEnv
+        @debug "Ignoring ActivationFailedMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    @error "Environment activation failed for process" testprocess_id=msg.testprocess_id is_precompile=ps.is_precompile_process error=msg.error_message
+
+    if ps.testrun_id === nothing || !haskey(c.test_runs, ps.testrun_id)
+        # No active test run — just kill process
+        _kill_julia_process!(ps)
+        transition!(ps.fsm, ProcessDead; reason="activation_failed_no_testrun")
+        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+        return false
+    end
+
+    tr = c.test_runs[ps.testrun_id]
+    testrun_id = ps.testrun_id
+
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        _kill_julia_process!(ps)
+        transition!(ps.fsm, ProcessDead; reason="activation_failed_testrun_ended")
+        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+        return false
+    end
+
+    if ps.is_precompile_process
+        # Precompile process failure is deterministic — all processes for this env will fail.
+        # Error ALL remaining items for this environment and kill all peer processes.
+        env = ps.env
+
+        # Collect all items for this environment
+        items_to_error = String[]
+        if tr.procs !== nothing && haskey(tr.procs, env)
+            for pid in tr.procs[env]
+                if haskey(tr.testitem_ids_by_proc, pid)
+                    for testitem_id in tr.testitem_ids_by_proc[pid]
+                        if haskey(tr.remaining_items, testitem_id)
+                            push!(items_to_error, testitem_id)
+                        end
+                    end
+                    empty!(tr.testitem_ids_by_proc[pid])
+                end
+            end
+        end
+
+        # Error all collected items
+        for testitem_id in items_to_error
+            if haskey(tr.remaining_items, testitem_id)
+                item = tr.remaining_items[testitem_id]
+                delete!(tr.remaining_items, testitem_id)
+                c.callbacks.on_testitem_errored(
+                    testrun_id,
+                    testitem_id,
+                    TestItemControllerProtocol.TestMessage[
+                        TestItemControllerProtocol.TestMessage(
+                            message = "Environment activation failed for package '$(env.package_name)': $(msg.error_message)",
+                            expectedOutput = missing,
+                            actualOutput = missing,
+                            uri = item.uri,
+                            line = item.line,
+                            column = item.column
+                        )
+                    ],
+                    missing
+                )
+            end
+        end
+
+        # Kill all peer processes for this environment (they're waiting for precompile that will never come)
+        if tr.procs !== nothing && haskey(tr.procs, env)
+            for pid in tr.procs[env]
+                if haskey(c.test_processes, pid)
+                    peer = c.test_processes[pid]
+                    _kill_julia_process!(peer)
+                    if state(peer.fsm) != ProcessDead
+                        transition!(peer.fsm, ProcessDead; reason="activation_failed_precompile_process")
+                    end
+                    put!(c.reactor_channel, TestProcessTerminatedMsg(pid))
+                end
+            end
+        end
+    else
+        # Non-precompile process — error only items assigned to this process
+        if haskey(tr.testitem_ids_by_proc, ps.id)
+            for testitem_id in tr.testitem_ids_by_proc[ps.id]
+                if haskey(tr.remaining_items, testitem_id)
+                    item = tr.remaining_items[testitem_id]
+                    delete!(tr.remaining_items, testitem_id)
+                    c.callbacks.on_testitem_errored(
+                        testrun_id,
+                        testitem_id,
+                        TestItemControllerProtocol.TestMessage[
+                            TestItemControllerProtocol.TestMessage(
+                                message = "Environment activation failed for package '$(ps.env.package_name)': $(msg.error_message)",
+                                expectedOutput = missing,
+                                actualOutput = missing,
+                                uri = item.uri,
+                                line = item.line,
+                                column = item.column
+                            )
+                        ],
+                        missing
+                    )
+                end
+            end
+            empty!(tr.testitem_ids_by_proc[ps.id])
+        end
+
+        _kill_julia_process!(ps)
+        transition!(ps.fsm, ProcessDead; reason="activation_failed")
+        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+    end
+
+    _check_testrun_complete!(c, tr)
+
+    return false
+end
+
 function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
     if !haskey(c.test_processes, msg.testprocess_id)
         return false
@@ -1268,7 +1392,7 @@ end
 function _activate_env!(c::TestItemController, ps::TestProcessState)
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Activating"))
     @async try
-        JSONRPC.send(
+        result = JSONRPC.send(
             ps.endpoint,
             TestItemServerProtocol.testserver_activate_env_request_type,
             TestItemServerProtocol.ActivateEnvParams(
@@ -1277,6 +1401,12 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
                 packageName = ps.env.package_name
             )
         )
+
+        if result.status == "failed"
+            @error "Environment activation failed" testprocess_id=ps.id error=coalesce(result.error, "unknown error")
+            put!(c.reactor_channel, ActivationFailedMsg(ps.id, coalesce(result.error, "Environment activation failed")))
+            return
+        end
 
         if ps.is_precompile_process && ps.testrun_id !== nothing
             put!(c.reactor_channel, PrecompileDoneMsg(ps.testrun_id, ps.env, ps.id))
