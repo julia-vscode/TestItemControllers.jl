@@ -77,7 +77,6 @@ mutable struct TestRunState
     coverage::Vector{CoverageTools.FileCoverage}
     cancellation_source::CancellationTokens.CancellationTokenSource
     completion_channel::Channel{Any}    # reactor puts result here; execute_testrun waits on it
-    process_crash_count::Int             # track consecutive process crashes to prevent infinite retry loops
 end
 
 function TestRunState(
@@ -105,6 +104,5 @@ function TestRunState(
         CoverageTools.FileCoverage[],               # coverage
         cancellation_source,
         Channel{Any}(1),                            # completion_channel
-        0,                                          # process_crash_count
     )
 end

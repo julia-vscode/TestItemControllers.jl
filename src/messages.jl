@@ -110,6 +110,7 @@ end
 struct TestProcessTerminatedInRunMsg <: ReactorMessage
     testrun_id::String
     testprocess_id::String
+    skip_remaining::Bool
 end
 
 struct TestItemTimeoutMsg <: ReactorMessage

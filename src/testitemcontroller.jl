@@ -140,7 +140,7 @@ function handle!(c::TestItemController, msg::TerminateTestProcessMsg)
     _kill_julia_process!(ps)
 
     if ps.testrun_id !== nothing
-        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, msg.testprocess_id))
+        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, msg.testprocess_id, true))
     end
     put!(c.reactor_channel, TestProcessTerminatedMsg(msg.testprocess_id))
 
@@ -748,7 +748,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
 
     terminated_proc_id = msg.testprocess_id
 
-    # Collect remaining items from the dead process's queue
+    # Collect remaining items from the dead process's queue.
     items_to_redistribute = String[]
     if haskey(tr.testitem_ids_by_proc, terminated_proc_id)
         for testitem_id in tr.testitem_ids_by_proc[terminated_proc_id]
@@ -784,32 +784,9 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         return false
     end
 
-    # If shutting down, skip remaining items instead of redistributing
-    if state(c.controller_fsm) != ControllerRunning || terminated_env === nothing
-        @info "Test process '$(terminated_proc_id)' terminated, skipping $(length(items_to_redistribute)) remaining item(s) (controller shutting down or env unknown)"
-        for testitem_id in items_to_redistribute
-            if haskey(tr.remaining_items, testitem_id)
-                delete!(tr.remaining_items, testitem_id)
-                c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id)
-            end
-        end
-        _check_testrun_complete!(c, tr)
-        return false
-    end
-
-    @info "Test process '$(terminated_proc_id)' terminated during test run, redistributing $(length(items_to_redistribute)) remaining item(s)"
-
-    # Track crashes — but only count towards the retry limit when we must
-    # create a NEW replacement process (an actual retry cycle).  Simultaneous
-    # startup failures from a transient OS error shouldn't each consume a
-    # retry, because only the fallback "launch new process" path is a real
-    # retry.  The counter is incremented below, after we determine whether a
-    # live recipient exists.
-    max_crash_retries = 3
-    @debug "Process crash count for test run" testrun_id=msg.testrun_id crash_count=tr.process_crash_count max_retries=max_crash_retries
-
-    if tr.process_crash_count > max_crash_retries
-        @error "Test run exceeded maximum process crash retries ($(max_crash_retries)), failing remaining items" testrun_id=msg.testrun_id crash_count=tr.process_crash_count remaining_items=length(items_to_redistribute)
+    # If explicitly terminated by user, error remaining items instead of redistributing
+    if msg.skip_remaining
+        @info "Test process '$(terminated_proc_id)' terminated by user, erroring $(length(items_to_redistribute)) remaining item(s)"
         for testitem_id in items_to_redistribute
             if haskey(tr.remaining_items, testitem_id)
                 item = tr.remaining_items[testitem_id]
@@ -819,7 +796,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                     testitem_id,
                     TestItemControllerProtocol.TestMessage[
                         TestItemControllerProtocol.TestMessage(
-                            message = "Test process crashed $(tr.process_crash_count) time(s) for test item '$(item.label)'. Giving up after $(max_crash_retries) retries.",
+                            message = "Test process terminated by user for test item '$(item.label)'",
                             expectedOutput = missing,
                             actualOutput = missing,
                             uri = item.uri,
@@ -835,32 +812,56 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         return false
     end
 
-    # Try to find another process in the same env that's part of this testrun
-    # Require the candidate has a live endpoint (not just a non-dead FSM state),
-    # since a process in ProcessStarting may have endpoint === nothing.
-    recipient_pid = nothing
-    if tr.procs !== nothing && haskey(tr.procs, terminated_env)
-        for pid in tr.procs[terminated_env]
-            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead && c.test_processes[pid].endpoint !== nothing
-                recipient_pid = pid
-                break
+    # If shutting down, skip remaining items instead of redistributing
+    if state(c.controller_fsm) != ControllerRunning || terminated_env === nothing
+        @info "Test process '$(terminated_proc_id)' terminated, skipping $(length(items_to_redistribute)) remaining item(s) (controller shutting down or env unknown)"
+        for testitem_id in items_to_redistribute
+            if haskey(tr.remaining_items, testitem_id)
+                delete!(tr.remaining_items, testitem_id)
+                c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id)
             end
         end
+        _check_testrun_complete!(c, tr)
+        return false
     end
 
-    if recipient_pid !== nothing
-        # Redistribute to existing process
-        ps = c.test_processes[recipient_pid]
-        append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
+    # Identify whether the crash happened while a test item was actively running.
+    # ps.current_testitem_id is set in TestItemStartedMsg and cleared in _cancel_timeout!
+    # (called on passed/failed/errored).  It is NOT cleared by _kill_julia_process!, so it
+    # is still valid here (TestProcessTerminatedMsg hasn't been processed yet).
+    ps = haskey(c.test_processes, terminated_proc_id) ? c.test_processes[terminated_proc_id] : nothing
+    crashed_item_id = ps !== nothing ? ps.current_testitem_id : nothing
 
-        items_to_run = [tr.remaining_items[id] for id in items_to_redistribute if haskey(tr.remaining_items, id)]
-        @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
-        _send_run_testitems!(c, ps, items_to_run)
-    else
-        # Creating a new replacement process counts as a real retry cycle.
-        tr.process_crash_count += 1
-        if tr.process_crash_count > max_crash_retries
-            @error "Test run exceeded maximum process crash retries ($(max_crash_retries)), failing remaining items" testrun_id=msg.testrun_id crash_count=tr.process_crash_count remaining_items=length(items_to_redistribute)
+    if crashed_item_id !== nothing && haskey(tr.remaining_items, crashed_item_id)
+        # A test item was actively running when the process crashed — error it immediately.
+        item = tr.remaining_items[crashed_item_id]
+        delete!(tr.remaining_items, crashed_item_id)
+        filter!(!isequal(crashed_item_id), items_to_redistribute)
+        _cancel_timeout!(ps)
+        @info "Test process '$(terminated_proc_id)' crashed while running test item '$(item.label)', erroring it immediately"
+        c.callbacks.on_testitem_errored(
+            msg.testrun_id,
+            crashed_item_id,
+            TestItemControllerProtocol.TestMessage[
+                TestItemControllerProtocol.TestMessage(
+                    message = "Test process crashed while running test item '$(item.label)'",
+                    expectedOutput = missing,
+                    actualOutput = missing,
+                    uri = item.uri,
+                    line = item.line,
+                    column = item.column
+                )
+            ],
+            missing
+        )
+    elseif crashed_item_id === nothing
+        # No item was actively running when the process died.
+        # Distinguish startup crash from post-run kill (timeout handler, etc.)
+        # by checking whether the process ever reached ProcessRunning.
+        process_was_running = ps !== nothing && state(ps.fsm) in (ProcessRunning, ProcessIdle)
+        if !process_was_running
+            # True startup crash — process never ran any item. Error all queued items.
+            @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
                 if haskey(tr.remaining_items, testitem_id)
                     item = tr.remaining_items[testitem_id]
@@ -870,7 +871,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                         testitem_id,
                         TestItemControllerProtocol.TestMessage[
                             TestItemControllerProtocol.TestMessage(
-                                message = "Test process crashed $(tr.process_crash_count) time(s) for test item '$(item.label)'. Giving up after $(max_crash_retries) retries.",
+                                message = "Test process crashed before running test item '$(item.label)'",
                                 expectedOutput = missing,
                                 actualOutput = missing,
                                 uri = item.uri,
@@ -885,8 +886,40 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
             _check_testrun_complete!(c, tr)
             return false
         end
+        # else: process was functional and was killed after running items (e.g., timeout).
+        # Fall through to redistribute remaining un-started items.
+        @info "Test process '$(terminated_proc_id)' terminated after running items, redistributing $(length(items_to_redistribute)) remaining item(s)"
+    end
 
-        # Create a new process for the redistributed items
+    # Redistribute remaining un-started items (if any) to another process.
+    if isempty(items_to_redistribute)
+        _check_testrun_complete!(c, tr)
+        return false
+    end
+
+    @info "Redistributing $(length(items_to_redistribute)) un-started item(s) from crashed process '$(terminated_proc_id)'"
+
+    # Try to find another live process in the same env
+    recipient_pid = nothing
+    if tr.procs !== nothing && haskey(tr.procs, terminated_env)
+        for pid in tr.procs[terminated_env]
+            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead && c.test_processes[pid].endpoint !== nothing
+                recipient_pid = pid
+                break
+            end
+        end
+    end
+
+    if recipient_pid !== nothing
+        # Redistribute to existing process
+        rps = c.test_processes[recipient_pid]
+        append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
+
+        items_to_run = [tr.remaining_items[id] for id in items_to_redistribute if haskey(tr.remaining_items, id)]
+        @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
+        _send_run_testitems!(c, rps, items_to_run)
+    else
+        # Create a new replacement process for the un-started items
         env = terminated_env
         profile = tr.profiles[1]
 
@@ -900,13 +933,10 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
 
         @info "Creating new replacement process for package '$(env.package_name)'"
 
-        # If precompile already done for this env, tell the new process so it
-        # doesn't wait for a peer that no longer exists.
         precompile_already_done = env in c.precompiled_envs
 
         testprocess_id = string(UUIDs.uuid4())
 
-        # Create TestProcessState and register it
         new_ps = TestProcessState(testprocess_id, env;
             is_precompile_process=precompile_already_done,
             precompile_done=precompile_already_done,
@@ -917,18 +947,15 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         pool_ids = get!(c.process_pool, env) do; String[]; end
         push!(pool_ids, testprocess_id)
 
-        # Add to testrun's procs
         if tr.procs !== nothing
             push!(get!(tr.procs, env) do; String[]; end, testprocess_id)
         end
 
-        # Assign items to new process
         tr.testitem_ids_by_proc[testprocess_id] = items_to_redistribute
         tr.stolen_ids_by_proc[testprocess_id] = String[]
 
         testrun_token = CancellationTokens.get_token(tr.cancellation_source)
 
-        # Build server-side test setup details
         server_test_setups = [
             TestItemServerProtocol.TestsetupDetails(
                 packageUri = i.package_uri,
@@ -1002,7 +1029,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     end
 
     # Post terminated in run message to handle redistribution
-    put!(c.reactor_channel, TestProcessTerminatedInRunMsg(msg.testrun_id, msg.testprocess_id))
+    put!(c.reactor_channel, TestProcessTerminatedInRunMsg(msg.testrun_id, msg.testprocess_id, false))
     return false
 end
 
@@ -1028,11 +1055,6 @@ function handle!(c::TestItemController, msg::TestProcessLaunchedMsg)
 
     ps.jl_process = msg.jl_process
     ps.endpoint = msg.endpoint
-
-    # Process connected successfully — reset crash counter for its testrun
-    if ps.testrun_id !== nothing && haskey(c.test_runs, ps.testrun_id)
-        c.test_runs[ps.testrun_id].process_crash_count = 0
-    end
 
     if ps.testrun_id === nothing
         # Process launched but testrun already ended (e.g. cancelled while starting)
@@ -1164,7 +1186,7 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
     else
         # Fatal error — terminate
         if ps.testrun_id !== nothing
-            put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id))
+            put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id, false))
         end
         put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
     end
@@ -1212,7 +1234,7 @@ function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
     CancellationTokens.cancel(ps.cs)
     _kill_julia_process!(ps)
     if ps.testrun_id !== nothing
-        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id))
+        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id, false))
     end
     put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
 end
@@ -1224,15 +1246,19 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
         CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(ps.cs))
     end
 
+    # Capture the token now so the catch block doesn't read a potentially-null
+    # ps.julia_proc_cs (which can happen if _kill_julia_process! races with us).
+    launch_token = CancellationTokens.get_token(ps.julia_proc_cs)
+
     @debug "Launching Julia process for test process" testprocess_id=ps.id package=ps.env.package_name mode=ps.env.mode is_precompile=ps.is_precompile_process precompile_done=ps.precompile_done testrun_id=something(ps.testrun_id, "none")
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Launching"))
 
     Base.ScopedValues.@with logging_node => "tp_$(ps.id[1:5])" @async try
         start(ps.id, c.reactor_channel, ps, ps.env, ps.debug_pipe_name,
               c.error_handler_file, c.crash_reporting_pipename,
-              CancellationTokens.get_token(ps.julia_proc_cs))
+              launch_token)
     catch err
-        if !CancellationTokens.is_cancellation_requested(CancellationTokens.get_token(ps.julia_proc_cs))
+        if !CancellationTokens.is_cancellation_requested(launch_token)
             @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
         end
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end

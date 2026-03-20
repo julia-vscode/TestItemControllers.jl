@@ -535,14 +535,18 @@ end
     # Send createTestRun (async since the slow test won't finish quickly)
     response_task = @async JSONRPC.send(client_endpoint, TestItemControllerProtocol.create_testrun_request_type, params)
 
-    # Wait for a process to be created
+    # Wait for the slow test item to actually start running before we terminate
     process_id = Ref{Union{Nothing,String}}(nothing)
     deadline = time() + 120
     while time() < deadline
         lock(notif_lock) do
-            created = filter(n -> n.method == "testProcessCreated", notifications)
-            if !isempty(created)
-                process_id[] = first(created).params["id"]
+            started = filter(n -> n.method == "testItemStarted", notifications)
+            if !isempty(started)
+                # Also grab the process id from the testProcessCreated notification
+                created = filter(n -> n.method == "testProcessCreated", notifications)
+                if !isempty(created)
+                    process_id[] = first(created).params["id"]
+                end
             end
         end
         process_id[] !== nothing && break
@@ -557,14 +561,12 @@ end
         TestItemControllerProtocol.TerminateTestProcessParams(testProcessId=process_id[])
     )
 
-    # Wait for the createTestRun to complete (should finish after process dies)
-    # The response task may fail because process termination can cause errors
+    # Wait for the createTestRun to complete — should finish promptly after
+    # process termination errors the remaining items (not redistribute them).
     @info "[test] terminateTestProcess: waiting for response"
-    try
-        TestHelpers.timed_wait(response_task, 120; label="jsonrpc-terminate-response")
-    catch e
-        @info "[test] terminateTestProcess: response task ended with expected error" exception=(e,)
-    end
+    TestHelpers.timed_wait(response_task, 120; label="jsonrpc-terminate-response")
+    response = fetch(response_task)
+    @test response.status == "success"
 
     sleep(1.0)
 
@@ -576,9 +578,23 @@ end
     terminated = lock(notif_lock) do
         filter(n -> n.method == "testProcessTerminated", notifications)
     end
+    errored = lock(notif_lock) do
+        filter(n -> n.method == "testItemErrored", notifications)
+    end
+    passed = lock(notif_lock) do
+        filter(n -> n.method == "testItemPassed", notifications)
+    end
 
     @test length(terminated) >= 1
     @test any(n -> n.params["id"] == process_id[], terminated)
+
+    # The slow test item should have been errored, not redistributed
+    @test length(errored) == length(slow_items)
+    @test length(passed) == 0
+    for n in errored
+        @test haskey(n.params, "messages")
+        @test length(n.params["messages"]) >= 1
+    end
 
     close(client_sock)
     close(server_sock)
