@@ -13,7 +13,7 @@ jobs:
     with:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
-      filter: 'begin; @info "FILTER_DIAG" filename=filename pwd=pwd() target=joinpath(pwd(), "test") match=startswith(filename, joinpath(pwd(), "test")); startswith(filename, joinpath(pwd(), "test")); end'
+      filter: 'dirname(filename) == joinpath(pwd(), "test")'
     permissions: write-all
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}
