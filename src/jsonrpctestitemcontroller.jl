@@ -10,21 +10,36 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
         error_handler_file=nothing,
         crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
 
-        endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out, err_handler)
+        endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out)
 
         jr = new{ERR_HANDLER}(err_handler, endpoint)
 
+        # Helper: send a JSONRPC notification, swallowing transport/endpoint errors.
+        # These callbacks run on the reactor thread; if the endpoint has closed
+        # (e.g. client disconnected), we must not let the exception propagate
+        # because it would interrupt the reactor's handle!() mid-execution and
+        # could prevent _check_testrun_complete!() from being reached.
+        function _safe_send(args...)
+            try
+                JSONRPC.send(jr.endpoint, args...)
+            catch err
+                if err isa JSONRPC.TransportError || err isa JSONRPC.JSONRPCError
+                    @debug "JSONRPC callback send failed (endpoint closed?)" exception=(err,)
+                else
+                    rethrow()
+                end
+            end
+        end
+
         callbacks = ControllerCallbacks(
-            on_testitem_started = (testrun_id, testitem_id) -> JSONRPC.send(
-                jr.endpoint,
+            on_testitem_started = (testrun_id, testitem_id) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemStarted,
                 TestItemControllerProtocol.TestItemStartedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id
                 )
             ),
-            on_testitem_passed = (testrun_id, testitem_id, duration) -> JSONRPC.send(
-                jr.endpoint,
+            on_testitem_passed = (testrun_id, testitem_id, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemPassed,
                 TestItemControllerProtocol.TestItemPassedParams(
                     testRunId=testrun_id,
@@ -32,8 +47,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                     duration=duration
                 )
             ),
-            on_testitem_failed = (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
-                jr.endpoint,
+            on_testitem_failed = (testrun_id, testitem_id, messages, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemFailed,
                 TestItemControllerProtocol.TestItemFailedParams(
                     testRunId=testrun_id,
@@ -42,8 +56,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                     duration=duration
                 )
             ),
-            on_testitem_errored = (testrun_id, testitem_id, messages, duration) -> JSONRPC.send(
-                jr.endpoint,
+            on_testitem_errored = (testrun_id, testitem_id, messages, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemErrored,
                 TestItemControllerProtocol.TestItemErroredParams(
                     testRunId=testrun_id,
@@ -52,13 +65,11 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                     duration=duration
                 )
             ),
-            on_testitem_skipped = (testrun_id, testitem_id) -> JSONRPC.send(
-                jr.endpoint,
+            on_testitem_skipped = (testrun_id, testitem_id) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemSkipped,
                 (testRunId=testrun_id, testItemId=testitem_id)
             ),
-            on_append_output = (testrun_id, testitem_id, output) -> JSONRPC.send(
-                jr.endpoint,
+            on_append_output = (testrun_id, testitem_id, output) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeAppendOutput,
                 TestItemControllerProtocol.AppendOutputParams(
                     testRunId=testrun_id,
@@ -66,16 +77,14 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                     output=output
                 )
             ),
-            on_attach_debugger = (testrun_id, debug_pipename) -> JSONRPC.send(
-                jr.endpoint,
+            on_attach_debugger = (testrun_id, debug_pipename) -> _safe_send(
                 TestItemControllerProtocol.notificationTypeLaunchDebugger,
                 (;
                     debugPipeName = debug_pipename,
                     testRunId = testrun_id
                 )
             ),
-            on_process_created = (id, package_name, package_uri, project_uri, coverage, env) -> JSONRPC.send(
-                jr.endpoint,
+            on_process_created = (id, package_name, package_uri, project_uri, coverage, env) -> _safe_send(
                 TestItemControllerProtocol.notificationTypeTestProcessCreated,
                 TestItemControllerProtocol.TestProcessCreatedParams(
                     id = id,
@@ -86,18 +95,15 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
                     env = env
                 )
             ),
-            on_process_terminated = id -> JSONRPC.send(
-                jr.endpoint,
+            on_process_terminated = id -> _safe_send(
                 TestItemControllerProtocol.notificationTypeTestProcessTerminated,
                 (;id = id)
             ),
-            on_process_status_changed = (id, status) -> JSONRPC.send(
-                jr.endpoint,
+            on_process_status_changed = (id, status) -> _safe_send(
                 TestItemControllerProtocol.notificationTypeTestProcessStatusChanged,
                 TestItemControllerProtocol.TestProcessStatusChangedParams(id = id, status = status)
             ),
-            on_process_output = (id, output) -> JSONRPC.send(
-                jr.endpoint,
+            on_process_output = (id, output) -> _safe_send(
                 TestItemControllerProtocol.notificationTypeTestProcessOutput,
                 TestItemControllerProtocol.TestProcessOutputParams(id = id, output = output)
             ),
@@ -178,7 +184,7 @@ end
 
 function Base.run(jr_controller::JSONRPCTestItemController)
     @debug "Starting JSON-RPC controller endpoint"
-    run(jr_controller.endpoint)
+    JSONRPC.start(jr_controller.endpoint)
 
     @async try
         while true
@@ -198,11 +204,15 @@ function Base.run(jr_controller::JSONRPCTestItemController)
             end
         end
     catch err
-        bt = catch_backtrace()
-        if jr_controller.err_handler !== nothing
-            jr_controller.err_handler(err, bt)
+        if err isa JSONRPC.TransportError || err isa JSONRPC.JSONRPCError
+            @debug "JSONRPC message loop ended" reason=err.msg
         else
-            @error "Error in JSONRPC message loop" exception=(err, bt)
+            bt = catch_backtrace()
+            if jr_controller.err_handler !== nothing
+                jr_controller.err_handler(err, bt)
+            else
+                @error "Error in JSONRPC message loop" exception=(err, bt)
+            end
         end
     end
 

@@ -124,7 +124,7 @@ function testrun_fsm(id::String)
     transitions = Dict{TestRunPhase,Set{TestRunPhase}}(
         TestRunCreated         => Set([TestRunWaitingForProcs, TestRunCancelled]),
         TestRunWaitingForProcs => Set([TestRunProcsAcquired, TestRunCancelled]),
-        TestRunProcsAcquired   => Set([TestRunRunning, TestRunCancelled]),
+        TestRunProcsAcquired   => Set([TestRunRunning, TestRunCancelled, TestRunCompleted]),
         TestRunRunning         => Set([TestRunCancelled, TestRunCompleted]),
     )
     return FSM(TestRunCreated, transitions, id)

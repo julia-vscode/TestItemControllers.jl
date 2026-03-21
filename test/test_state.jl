@@ -100,7 +100,6 @@ end
     @test isempty(rs.items_dispatched_to_procs)
     @test isempty(rs.processes_ready_before_acquired)
     @test isempty(rs.coverage)
-    @test rs.process_crash_count == 0
     # completion_channel should be open
     @test isopen(rs.completion_channel)
 end

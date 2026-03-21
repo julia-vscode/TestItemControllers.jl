@@ -13,10 +13,12 @@
     indefinitely.
     """
     function timed_wait(task::Task, timeout_secs::Real; label::String="task")
+        timed_out = Ref(false)
         timer = Timer(timeout_secs)
         @async begin
             wait(timer)
             if !istaskdone(task)
+                timed_out[] = true
                 @error "HANG DETECTED: $(label) did not complete within $(timeout_secs)s"
                 # Print stack traces of all tasks to aid debugging
                 try
@@ -27,6 +29,11 @@
         end
         wait(task)
         close(timer)
+        # The task's own try-catch may swallow the throwto exception, so
+        # check explicitly whether the timeout fired and fail loudly.
+        if timed_out[]
+            error("timed_wait exceeded timeout: $(label) did not complete within $(timeout_secs)s")
+        end
     end
 
     function discover_test_items(pkg_path::String)
@@ -152,10 +159,12 @@
         end
 
         # Wait for test run with timeout
+        timed_out = Ref(false)
         timer = Timer(timeout)
         @async begin
             wait(timer)
             if !istaskdone(testrun_task)
+                timed_out[] = true
                 @warn "Test run timed out after $(timeout)s, shutting down"
                 shutdown(controller)
             end
@@ -166,6 +175,10 @@
 
         shutdown(controller)
         wait(controller_task)
+
+        if timed_out[]
+            error("run_testrun timed out after $(timeout)s")
+        end
 
         return (events=events, process_events=process_events, coverage=coverage_result)
     end
