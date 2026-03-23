@@ -9,7 +9,6 @@ import Logging
 
 include("../../../shared/testserver_protocol.jl")
 include("helper.jl")
-include("vscode_testset.jl")
 
 mutable struct Testsetup
     name::String
