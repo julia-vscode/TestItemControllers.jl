@@ -43,6 +43,48 @@ end
     @test ismissing(msg2.actualOutput)
 end
 
+@testitem "TestMessage with stackTrace round-trip" begin
+    using TestItemControllers: TestItemControllerProtocol, JSON
+
+    msg = TestItemControllerProtocol.TestMessage(
+        message = "Some error",
+        uri = "file:///test.jl",
+        line = 5,
+        column = 1,
+        stackTrace = [
+            TestItemControllerProtocol.TestMessageStackFrame(
+                label = "my_function",
+                uri = "file:///src/foo.jl",
+                line = 42,
+                column = 1,
+            ),
+            TestItemControllerProtocol.TestMessageStackFrame(
+                label = "top-level scope",
+                uri = missing,
+                line = missing,
+                column = missing,
+            ),
+        ],
+    )
+
+    json_str = JSON.json(msg)
+    parsed = JSON.parse(json_str)
+    msg2 = TestItemControllerProtocol.TestMessage(parsed)
+
+    @test msg2.message == "Some error"
+    @test !ismissing(msg2.stackTrace)
+    @test length(msg2.stackTrace) == 2
+
+    @test msg2.stackTrace[1].label == "my_function"
+    @test msg2.stackTrace[1].uri == "file:///src/foo.jl"
+    @test msg2.stackTrace[1].line == 42
+    @test msg2.stackTrace[1].column == 1
+
+    @test msg2.stackTrace[2].label == "top-level scope"
+    @test ismissing(msg2.stackTrace[2].uri)
+    @test ismissing(msg2.stackTrace[2].line)
+end
+
 @testitem "TestItemDetail round-trip" begin
     using TestItemControllers: TestItemControllerProtocol, JSON
 

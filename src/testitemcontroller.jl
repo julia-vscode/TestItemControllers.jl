@@ -636,6 +636,18 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
     return false
 end
 
+function _convert_stack_trace(server_stack::Union{Missing,Vector{TestItemServerProtocol.TestMessageStackFrame}})
+    server_stack === missing && return missing
+    return TestItemControllerProtocol.TestMessageStackFrame[
+        TestItemControllerProtocol.TestMessageStackFrame(
+            label = frame.label,
+            uri = frame.uri,
+            line = frame.location !== missing ? frame.location.position.line : missing,
+            column = frame.location !== missing ? frame.location.position.character : missing,
+        ) for frame in server_stack
+    ]
+end
+
 function handle!(c::TestItemController, msg::TestItemFailedMsg)
     if !haskey(c.test_runs, msg.testrun_id)
         return false
@@ -668,7 +680,8 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
                     actualOutput = i.actualOutput,
                     uri = i.location.uri,
                     line = i.location.position.line,
-                    column = i.location.position.character
+                    column = i.location.position.character,
+                    stackTrace = _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
             msg.duration
@@ -714,7 +727,8 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
                     actualOutput = missing,
                     uri = i.location.uri,
                     line = i.location.position.line,
-                    column = i.location.position.character
+                    column = i.location.position.character,
+                    stackTrace = _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
             msg.duration
