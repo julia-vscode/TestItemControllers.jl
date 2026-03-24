@@ -48,6 +48,16 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
     end
 end
 
+const TESTITEMSERVER_DIR = @__DIR__
+const JULIA_BASE_DIR = normpath(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia", "base"))
+const JULIA_STDLIB_DIR = Sys.STDLIB
+
+function is_infrastructure_frame(file::AbstractString)
+    startswith(file, TESTITEMSERVER_DIR) ||
+    startswith(file, JULIA_BASE_DIR) ||
+    startswith(file, JULIA_STDLIB_DIR)
+end
+
 const DEBUG_SESSION = Ref{Channel{DebugAdapter.DebugSession}}()
 
 function __init__()
@@ -88,13 +98,28 @@ end
 
 function format_error_message(err, bt)
     try
-        return Base.invokelatest(sprint, Base.display_error, err, bt)
+        actual_err = err isa LoadError ? err.error : err
+        return Base.invokelatest(sprint, showerror, actual_err)
     catch err
-        # TODO We could probably try to output an even better error message here that
-        # takes into account `err`. And in the callsites we should probably also
-        # handle this better.
         return "Error while trying to format an error message"
     end
+end
+
+function find_error_location(st)
+    for frame in st
+        frame.from_c && continue
+        file = string(frame.file)
+        if !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+        if !is_infrastructure_frame(file)
+            return (file, frame.line)
+        end
+    end
+    return (string(st[1].file), st[1].line)
 end
 
 function backtrace_to_stackframes(bt)
@@ -105,11 +130,20 @@ function backtrace_to_stackframes(bt)
     end
 
     result = TestItemServerProtocol.TestMessageStackFrame[]
+    resolved_files = String[]
 
     for frame in frames
         frame.from_c && continue
 
         file = string(frame.file)
+
+        if !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+
         uri = isabspath(file) ? filepath2uri(file) : missing
         location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(frame.line, 1)) : missing
 
@@ -118,7 +152,16 @@ function backtrace_to_stackframes(bt)
             uri = uri,
             location = location,
         ))
+        push!(resolved_files, file)
     end
+
+    # Truncate trailing infrastructure frames (TestItemServer, Julia base, stdlib)
+    # while preserving base/stdlib frames that appear within the user's call chain
+    last_user_frame = findlast(f -> !is_infrastructure_frame(f), resolved_files)
+    if last_user_frame === nothing
+        return missing
+    end
+    resize!(result, last_user_frame)
 
     return isempty(result) ? missing : result
 end
@@ -229,13 +272,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 error_message = format_error_message(err, bt)
                 stack_frames = backtrace_to_stackframes(bt)
 
-                if err isa LoadError
-                    error_filepath = err.file
-                    error_line = err.line
-                else
-                    error_filepath =  string(st[1].file)
-                    error_line = st[1].line
-                end
+                error_filepath, error_line = find_error_location(st)
 
                 return (
                     TestItemServerProtocol.errored_notification_type,
@@ -410,13 +447,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             error_message = format_error_message(err, bt)
             stack_frames = backtrace_to_stackframes(bt)
 
-            if err isa LoadError
-                error_filepath = err.file
-                error_line = err.line
-            else
-                error_filepath =  string(st[1].file)
-                error_line = st[1].line
-            end
+            error_filepath, error_line = find_error_location(st)
 
             return (
                 TestItemServerProtocol.errored_notification_type,
