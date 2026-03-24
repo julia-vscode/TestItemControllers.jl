@@ -96,14 +96,10 @@ function flatten_failed_tests!(ts, out)
     end
 end
 
-include("ansi_to_markdown.jl")
-
 function format_error_message(err, bt)
     try
         actual_err = err isa LoadError ? err.error : err
-        io = IOContext(IOBuffer(), :color => true)
-        Base.invokelatest(showerror, io, actual_err)
-        return ansi_to_markdown(String(take!(io.io)))
+        return Base.invokelatest(sprint, showerror, actual_err)
     catch err
         return "Error while trying to format an error message"
     end
