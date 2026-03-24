@@ -166,6 +166,65 @@ function backtrace_to_stackframes(bt)
     return isempty(result) ? missing : result
 end
 
+function parse_backtrace_string(bt_str::AbstractString)
+    (bt_str === nothing || isempty(bt_str)) && return missing
+
+    # Each frame spans two lines:
+    #  [N] func_signature
+    #    @ Module path:line [inlined]
+    # The path may be a Windows path like C:\dir\file.jl:42
+    # so we match the colon-digit at the END to get the line number.
+    frame_re = r"^\s*\[\d+\]\s+(.+?)(?:\s+\(repeats \d+ times\))?$"m
+    location_re = r"^\s*@\s+\S+\s+(.+):(\d+)"m
+
+    func_matches = collect(eachmatch(frame_re, bt_str))
+    loc_matches  = collect(eachmatch(location_re, bt_str))
+
+    isempty(func_matches) && return missing
+
+    result = TestItemServerProtocol.TestMessageStackFrame[]
+    resolved_files = String[]
+
+    for idx in eachindex(func_matches)
+        label = strip(func_matches[idx].captures[1])
+
+        file = ""
+        line = 0
+        if idx <= length(loc_matches)
+            file = strip(string(loc_matches[idx].captures[1]))
+            # Remove trailing " [inlined]" if present
+            file = replace(file, r"\s+\[inlined\]$" => "")
+            line = parse(Int, loc_matches[idx].captures[2])
+        end
+
+        if !isempty(file) && !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+
+        uri = (!isempty(file) && isabspath(file)) ? filepath2uri(file) : missing
+        location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(line, 1)) : missing
+
+        push!(result, TestItemServerProtocol.TestMessageStackFrame(
+            label = string(label),
+            uri = uri,
+            location = location,
+        ))
+        push!(resolved_files, file)
+    end
+
+    # Truncate trailing infrastructure frames, same as backtrace_to_stackframes
+    last_user_frame = findlast(f -> !isempty(f) && !is_infrastructure_frame(f), resolved_files)
+    if last_user_frame === nothing
+        return missing
+    end
+    resize!(result, last_user_frame)
+
+    return isempty(result) ? missing : result
+end
+
 function clear_coverage_data()
     @static if VERSION >= v"1.11.0-rc2"
         try
@@ -530,8 +589,8 @@ end
 function create_test_message_for_failed(i)
     (expected, actual) = extract_expected_and_actual(i)
 
-    stack_frames = if i isa Test.Error && hasproperty(i, :backtrace) && i.backtrace !== nothing
-        backtrace_to_stackframes(i.backtrace)
+    stack_frames = if hasproperty(i, :backtrace) && i.backtrace isa AbstractString && !isempty(i.backtrace)
+        parse_backtrace_string(i.backtrace)
     else
         missing
     end
