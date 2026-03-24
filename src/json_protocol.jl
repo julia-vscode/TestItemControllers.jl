@@ -71,6 +71,13 @@ end
 
 const terminate_test_process_request_type = RequestType("terminateTestProcess", TerminateTestProcessParams, Nothing)
 
+@dict_readable struct TestMessageStackFrame <: JSONRPC.Outbound
+    label::String
+    uri::Union{Missing,String}
+    line::Union{Missing,Int}
+    column::Union{Missing,Int}
+end
+
 @dict_readable struct TestMessage <: JSONRPC.Outbound
     message::String
     expectedOutput::Union{Missing,String}
@@ -78,6 +85,7 @@ const terminate_test_process_request_type = RequestType("terminateTestProcess", 
     uri::Union{Missing,String}
     line::Union{Missing,Int}
     column::Union{Missing,Int}
+    stackTrace::Union{Missing,Vector{TestMessageStackFrame}}
 end
 
 @dict_readable struct TestItemStartedParams <: Outbound

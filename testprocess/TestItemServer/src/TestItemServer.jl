@@ -48,6 +48,16 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
     end
 end
 
+const TESTITEMSERVER_DIR = @__DIR__
+const JULIA_BASE_DIR = normpath(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia", "base"))
+const JULIA_STDLIB_DIR = Sys.STDLIB
+
+function is_infrastructure_frame(file::AbstractString)
+    startswith(file, TESTITEMSERVER_DIR) ||
+    startswith(file, JULIA_BASE_DIR) ||
+    startswith(file, JULIA_STDLIB_DIR)
+end
+
 const DEBUG_SESSION = Ref{Channel{DebugAdapter.DebugSession}}()
 
 function __init__()
@@ -88,13 +98,131 @@ end
 
 function format_error_message(err, bt)
     try
-        return Base.invokelatest(sprint, Base.display_error, err, bt)
+        actual_err = err isa LoadError ? err.error : err
+        return Base.invokelatest(sprint, showerror, actual_err)
     catch err
-        # TODO We could probably try to output an even better error message here that
-        # takes into account `err`. And in the callsites we should probably also
-        # handle this better.
         return "Error while trying to format an error message"
     end
+end
+
+function find_error_location(st)
+    for frame in st
+        frame.from_c && continue
+        file = string(frame.file)
+        if !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+        if !is_infrastructure_frame(file)
+            return (file, frame.line)
+        end
+    end
+    return (string(st[1].file), st[1].line)
+end
+
+function backtrace_to_stackframes(bt)
+    frames = try
+        stacktrace(bt)
+    catch
+        return missing
+    end
+
+    result = TestItemServerProtocol.TestMessageStackFrame[]
+    resolved_files = String[]
+
+    for frame in frames
+        frame.from_c && continue
+
+        file = string(frame.file)
+
+        if !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+
+        uri = isabspath(file) ? filepath2uri(file) : missing
+        location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(frame.line, 1)) : missing
+
+        push!(result, TestItemServerProtocol.TestMessageStackFrame(
+            label = string(frame.func),
+            uri = uri,
+            location = location,
+        ))
+        push!(resolved_files, file)
+    end
+
+    # Truncate trailing infrastructure frames (TestItemServer, Julia base, stdlib)
+    # while preserving base/stdlib frames that appear within the user's call chain
+    last_user_frame = findlast(f -> !is_infrastructure_frame(f), resolved_files)
+    if last_user_frame === nothing
+        return missing
+    end
+    resize!(result, last_user_frame)
+
+    return isempty(result) ? missing : result
+end
+
+function parse_backtrace_string(bt_str::AbstractString)
+    (bt_str === nothing || isempty(bt_str)) && return missing
+
+    # Each frame spans two lines:
+    #  [N] func_signature
+    #    @ Module path:line [inlined]
+    # The path may be a Windows path like C:\dir\file.jl:42
+    # so we match the colon-digit at the END to get the line number.
+    frame_re = r"^\s*\[\d+\]\s+(.+?)(?:\s+\(repeats \d+ times\))?$"m
+    location_re = r"^\s*@\s+\S+\s+(.+):(\d+)"m
+
+    func_matches = collect(eachmatch(frame_re, bt_str))
+    loc_matches  = collect(eachmatch(location_re, bt_str))
+
+    isempty(func_matches) && return missing
+
+    result = TestItemServerProtocol.TestMessageStackFrame[]
+    resolved_files = String[]
+
+    for idx in eachindex(func_matches)
+        label = strip(func_matches[idx].captures[1])
+
+        file = ""
+        line = 0
+        if idx <= length(loc_matches)
+            file = strip(string(loc_matches[idx].captures[1]))
+            # Remove trailing " [inlined]" if present
+            file = replace(file, r"\s+\[inlined\]$" => "")
+            line = parse(Int, loc_matches[idx].captures[2])
+        end
+
+        if !isempty(file) && !isabspath(file)
+            resolved = Base.find_source_file(file)
+            if resolved !== nothing
+                file = resolved
+            end
+        end
+
+        uri = (!isempty(file) && isabspath(file)) ? filepath2uri(file) : missing
+        location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(line, 1)) : missing
+
+        push!(result, TestItemServerProtocol.TestMessageStackFrame(
+            label = string(label),
+            uri = uri,
+            location = location,
+        ))
+        push!(resolved_files, file)
+    end
+
+    # Truncate trailing infrastructure frames, same as backtrace_to_stackframes
+    last_user_frame = findlast(f -> !isempty(f) && !is_infrastructure_frame(f), resolved_files)
+    if last_user_frame === nothing
+        return missing
+    end
+    resize!(result, last_user_frame)
+
+    return isempty(result) ? missing : result
 end
 
 function clear_coverage_data()
@@ -201,14 +329,9 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 st = stacktrace(bt)
 
                 error_message = format_error_message(err, bt)
+                stack_frames = backtrace_to_stackframes(bt)
 
-                if err isa LoadError
-                    error_filepath = err.file
-                    error_line = err.line
-                else
-                    error_filepath =  string(st[1].file)
-                    error_line = st[1].line
-                end
+                error_filepath, error_line = find_error_location(st)
 
                 return (
                     TestItemServerProtocol.errored_notification_type,
@@ -216,11 +339,12 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                         testItemId = params.id,
                         messages = [
                             TestItemServerProtocol.TestMessage(
-                                error_message,
-                                TestItemServerProtocol.Location(
+                                message = error_message,
+                                location = TestItemServerProtocol.Location(
                                     isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
                                     TestItemServerProtocol.Position(max(1, error_line), 1)
-                                )
+                                ),
+                                stackTrace = stack_frames,
                             )
                         ],
                         duration = missing
@@ -266,6 +390,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             catch err
                 bt = catch_backtrace()
                 error_message = format_error_message(err, bt)
+                stack_frames = backtrace_to_stackframes(bt)
 
                 return (
                     TestItemServerProtocol.errored_notification_type,
@@ -273,11 +398,12 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                         testItemId = params.id,
                         messages = [
                             TestItemServerProtocol.TestMessage(
-                                error_message,
-                                TestItemServerProtocol.Location(
+                                message = error_message,
+                                location = TestItemServerProtocol.Location(
                                     params.uri,
                                     TestItemServerProtocol.Position(params.line, 1)
-                                )
+                                ),
+                                stackTrace = stack_frames,
                             )
                         ],
                         duration = missing
@@ -316,18 +442,21 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 error("Unknown testsetup kind $(i.kind).")
             end
         catch err
-            Base.display_error(err, catch_backtrace())
+            bt = catch_backtrace()
+            Base.display_error(err, bt)
+            stack_frames = backtrace_to_stackframes(bt)
             return (
                 TestItemServerProtocol.errored_notification_type,
                 TestItemServerProtocol.ErroredParams(
                     testItemId = params.id,
                     messages = [
                         TestItemServerProtocol.TestMessage(
-                            "Unable to load the `$i` testsetup.",
-                            TestItemServerProtocol.Location(
+                            message = "Unable to load the `$i` testsetup.",
+                            location = TestItemServerProtocol.Location(
                                 params.uri,
                                 TestItemServerProtocol.Position(params.line, 1)
-                            )
+                            ),
+                            stackTrace = stack_frames,
                         )
                     ],
                     duration = missing
@@ -375,16 +504,9 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             st = stacktrace(bt)
 
             error_message = format_error_message(err, bt)
+            stack_frames = backtrace_to_stackframes(bt)
 
-
-
-            if err isa LoadError
-                error_filepath = err.file
-                error_line = err.line
-            else
-                error_filepath =  string(st[1].file)
-                error_line = st[1].line
-            end
+            error_filepath, error_line = find_error_location(st)
 
             return (
                 TestItemServerProtocol.errored_notification_type,
@@ -392,11 +514,12 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                     testItemId = params.id,
                     messages = [
                         TestItemServerProtocol.TestMessage(
-                            error_message,
-                            TestItemServerProtocol.Location(
+                            message = error_message,
+                            location = TestItemServerProtocol.Location(
                                 isabspath(error_filepath) ? filepath2uri(error_filepath) : "",
                                 TestItemServerProtocol.Position(max(1, error_line), 1)
-                            )
+                            ),
+                            stackTrace = stack_frames,
                         )
                     ],
                     duration = missing
@@ -465,10 +588,20 @@ end
 
 function create_test_message_for_failed(i)
     (expected, actual) = extract_expected_and_actual(i)
-    return TestItemServerProtocol.TestMessage(sprint(Base.show, i),
-        expected,
-        actual,
-        TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)))
+
+    stack_frames = if hasproperty(i, :backtrace) && i.backtrace isa AbstractString && !isempty(i.backtrace)
+        parse_backtrace_string(i.backtrace)
+    else
+        missing
+    end
+
+    return TestItemServerProtocol.TestMessage(
+        message = sprint(Base.show, i),
+        expectedOutput = expected,
+        actualOutput = actual,
+        location = TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)),
+        stackTrace = stack_frames,
+    )
 end
 
 function extract_expected_and_actual(result)
