@@ -327,14 +327,14 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
                 precompile_success = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
 
                 @debug "Precompile of test server" precompile_success
-
-                push!(c.testprocess_precompile_not_required, (
-                    julia_cmd=k.juliaCmd,
-                    julia_args=k.juliaArgs,
-                    env=k.env,
-                    coverage=k.mode == "Coverage"
-                ))
             end
+
+            push!(c.testprocess_precompile_not_required, (
+                julia_cmd=k.juliaCmd,
+                julia_args=k.juliaArgs,
+                env=k.env,
+                coverage=k.mode == "Coverage"
+            ))
         end
 
         precompile_required = !(k in c.precompiled_envs)

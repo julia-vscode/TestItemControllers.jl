@@ -4,6 +4,7 @@ include("pkg_imports.jl")
 
 import .JSONRPC: @dict_readable
 import .CoverageTools: LCOV, amend_coverage_from_src!
+import .CancellationTokens: CancellationToken
 import Test, Pkg, Sockets
 import Logging
 
@@ -20,9 +21,8 @@ mutable struct Testsetup
     evaled::Bool
 end
 
-mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
+mutable struct TestProcessState
     endpoint::JSONRPC.JSONRPCEndpoint
-    err_handler::ERR_HANDLER
 
     test_setups::Dict{Tuple{String,Symbol},Testsetup}
     mode::String
@@ -33,10 +33,9 @@ mutable struct TestProcessState{ERR_HANDLER<:Union{Function,Nothing}}
     stolen_testitem_ids_channel::Channel{Vector{String}}
     wakeup_channel::Channel{Nothing}
 
-    function TestProcessState(endpoint::JSONRPC.JSONRPCEndpoint, err_handler::ERR_HANDLER = nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
-        return new{ERR_HANDLER}(
+    function TestProcessState(endpoint::JSONRPC.JSONRPCEndpoint)
+        return new(
             endpoint,
-            err_handler,
             Dict{Tuple{String,Symbol},Testsetup}(),
             "",
             nothing,
@@ -78,7 +77,7 @@ function withpath(f, path)
     end
 end
 
-function revise_request(::Nothing, state::TestProcessState, token)
+function revise_request(::Nothing, state::TestProcessState, token::CancellationToken)
     try
         Revise.revise(throw=true)
         return "success"
@@ -579,7 +578,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
     end
 end
 
-function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItemsRequestParams, state::TestProcessState, token)
+function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItemsRequestParams, state::TestProcessState, token::CancellationToken)
     put!(state.testitems_channel, params.testItems)
     put!(state.wakeup_channel, nothing)
 
@@ -648,7 +647,7 @@ end
 
 
 
-function start_debug_backend(debug_pipename, error_handler)
+function start_debug_backend(debug_pipename::String, error_handler)
     ready = Channel{Bool}(1)
     @async try
         server = Sockets.listen(debug_pipename)
@@ -672,11 +671,14 @@ function start_debug_backend(debug_pipename, error_handler)
         end
     catch err
         bt = catch_backtrace()
-        if err_handler !== nothing
-            err_handler(err, bt)
-        else
-            Base.display_error(err, bt)
+
+        if error_handler !== nothing
+            Base.invokelatest(error_handler, err, bt)
         end
+
+        @error "The TestItemServer debug task failed." exception = (err, bt)
+                
+        exit(1) 
     end
 
     take!(ready)
@@ -696,7 +698,7 @@ function get_debug_session_if_present()
 end
 
 
-function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token)
+function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
         if params.projectUri===missing
             @static if VERSION >= v"1.5.0"
@@ -740,7 +742,7 @@ function parse_log_level(s::Symbol)::Base.CoreLogging.LogLevel
     return Logging.Info
 end
 
-function configure_test_run_request(params::TestItemServerProtocol.ConfigureTestRunRequestParams, state::TestProcessState, token)
+function configure_test_run_request(params::TestItemServerProtocol.ConfigureTestRunRequestParams, state::TestProcessState, token::CancellationToken)
     state.mode = params.mode
     state.log_level = parse_log_level(Symbol(params.logLevel))
     state.coverage_root_uris = coalesce(params.coverageRootUris, nothing)
@@ -779,14 +781,14 @@ function configure_test_run_request(params::TestItemServerProtocol.ConfigureTest
     end
 end
 
-function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState, token)
+function steal_testitems_request(params::TestItemServerProtocol.StealTestItemsRequestParams, state::TestProcessState, token::CancellationToken)
     put!(state.stolen_testitem_ids_channel, params.testItemIds)
     put!(state.wakeup_channel, nothing)
 
     return nothing
 end
 
-function shutdown_request(::Nothing, state::TestProcessState, token)
+function shutdown_request(::Nothing, state::TestProcessState, token::CancellationToken)
     return nothing
 end
 
@@ -878,12 +880,20 @@ function serve(pipename, debug_pipename, error_handler=nothing)
 
     JSONRPC.start(endpoint)
 
-    state = TestProcessState(endpoint, error_handler)
+    state = TestProcessState(endpoint)
 
     @async try
         runner_loop(state)
     catch err
-        Base.display_error(err, catch_backtrace())
+        bt = catch_backtrace()
+
+        if error_handler !== nothing
+            Base.invokelatest(error_handler, err, bt)
+        end
+
+        @error "The TestItemServer runner loop crashed with an error." exception = (err, bt)
+        
+        exit(1)
     end
 
     while true
@@ -896,10 +906,21 @@ function serve(pipename, debug_pipename, error_handler=nothing)
             @async try
                 dispatch_msg(endpoint, msg, state)
             catch err
-                Base.display_error(err, catch_backtrace())
+                bt = catch_backtrace()
+
+                if error_handler !== nothing
+                    Base.invokelatest(error_handler, err, bt)
+                end
+                
+                @error "The TestItemServer failed to dispatch a message." exception = (err, bt)
+                
+                exit(1)                
             end
         end
     end
 end
+
+include("precompile.jl")
+_precompile_()
 
 end
