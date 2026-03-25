@@ -1,7 +1,5 @@
 module TestItemControllers
 
-const logging_node = Base.ScopedValues.ScopedValue("main")
-
 import Sockets, UUIDs, Dates
 
 include("../packages/URIParser/src/URIParser.jl")

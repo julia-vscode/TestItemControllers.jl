@@ -1,18 +1,16 @@
-mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
-    err_handler::Union{Nothing,ERR_HANDLER}
+mutable struct JSONRPCTestItemController
     endpoint::JSONRPC.JSONRPCEndpoint
     controller::TestItemController
 
     function JSONRPCTestItemController(
         pipe_in,
-        pipe_out,
-        err_handler::ERR_HANDLER;
+        pipe_out;
         error_handler_file=nothing,
-        crash_reporting_pipename=nothing) where {ERR_HANDLER<:Union{Function,Nothing}}
+        crash_reporting_pipename=nothing)
 
         endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out)
 
-        jr = new{ERR_HANDLER}(err_handler, endpoint)
+        jr = new(endpoint)
 
         # Helper: send a JSONRPC notification, swallowing transport/endpoint errors.
         # These callbacks run on the reactor thread; if the endpoint has closed
@@ -109,7 +107,7 @@ mutable struct JSONRPCTestItemController{ERR_HANDLER<:Function}
             ),
         )
 
-        jr.controller = TestItemController(callbacks, err_handler; error_handler_file=error_handler_file, crash_reporting_pipename=crash_reporting_pipename)
+        jr.controller = TestItemController(callbacks; error_handler_file=error_handler_file, crash_reporting_pipename=crash_reporting_pipename)
 
         return jr
     end
@@ -196,11 +194,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
                 bt = catch_backtrace()
-                if jr_controller.err_handler !== nothing
-                    jr_controller.err_handler(err, bt)
-                else
-                    @error "Error dispatching message" exception=(err, bt)
-                end
+                @error "Error dispatching message" exception=(err, bt)
             end
         end
     catch err
@@ -208,11 +202,7 @@ function Base.run(jr_controller::JSONRPCTestItemController)
             @debug "JSONRPC message loop ended" reason=err.msg
         else
             bt = catch_backtrace()
-            if jr_controller.err_handler !== nothing
-                jr_controller.err_handler(err, bt)
-            else
-                @error "Error in JSONRPC message loop" exception=(err, bt)
-            end
+            @error "Error in JSONRPC message loop" exception=(err, bt)
         end
     end
 

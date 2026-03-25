@@ -1,5 +1,4 @@
-mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing},CB<:ControllerCallbacks}
-    err_handler::ERR_HANDLER
+mutable struct TestItemController{CB<:ControllerCallbacks}
     callbacks::CB
 
     reactor_channel::Channel{ReactorMessage}
@@ -27,14 +26,12 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing},CB<:Contr
     process_tasks::Vector{Task}
 
     function TestItemController(
-        callbacks::CB,
-        err_handler::ERR_HANDLER=nothing;
+        callbacks::CB;
         error_handler_file=nothing,
         crash_reporting_pipename=nothing,
-        log_level::Symbol=:Info) where {ERR_HANDLER<:Union{Function,Nothing},CB<:ControllerCallbacks}
+        log_level::Symbol=:Info) where {CB<:ControllerCallbacks}
 
-        return new{ERR_HANDLER,CB}(
-            err_handler,
+        return new{CB}(
             callbacks,
             Channel{ReactorMessage}(Inf),
             Dict{String,TestProcessState}(),
@@ -1417,11 +1414,12 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
     @debug "Launching Julia process for test process" testprocess_id=ps.id package=ps.env.package_name mode=ps.env.mode is_precompile=ps.is_precompile_process precompile_done=ps.precompile_done testrun_id=something(ps.testrun_id, "none")
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Launching"))
 
-    t = Base.ScopedValues.@with logging_node => "tp_$(ps.id[1:5])" @async try
+    t = @async try
         start(ps.id, c.reactor_channel, ps, ps.env, ps.debug_pipe_name,
               c.error_handler_file, c.crash_reporting_pipename,
               launch_token)
     catch err
+        # TODO This sequence doesn't make sense, if `@error` has been called, everything stops
         if !CancellationTokens.is_cancellation_requested(launch_token)
             @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
         end
@@ -1454,6 +1452,7 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
         end
         put!(c.reactor_channel, TestProcessActivatedMsg(ps.id))
     catch err
+        # TODO Anything after `@error` is probably not gonna run
         @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
@@ -1478,6 +1477,7 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
         )
         put!(c.reactor_channel, TestProcessTestSetupsLoadedMsg(ps.id))
     catch err
+        # TODO Anything after `@error` is probably not gonna run
         @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
@@ -1514,6 +1514,7 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
             )
         )
     catch err
+        # TODO Anything after `@error` is probably not gonna run
         @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
@@ -1562,6 +1563,7 @@ function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_has
         ps.test_env_content_hash = new_env_hash
         put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, needs_restart))
     catch err
+        # TODO Anything after `@error` is probably not gonna run
         @error "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
         try put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, true)) catch end
     end
@@ -1745,122 +1747,119 @@ function execute_testrun(
 
     @assert length(profiles) == 1 "Currently one must pass one test profile"
 
-    Base.ScopedValues.@with logging_node => "testrun_$(testrun_id)" begin
+    @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s)"
 
-        @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s)"
+    # Build TestRunState
+    tr = TestRunState(
+        testrun_id,
+        profiles,
+        test_items,
+        [
+            TestSetupDetail(i.package_uri, i.name, i.kind, i.uri, i.line, i.column, i.code)
+            for i in test_setups
+        ];
+        token = token
+    )
 
-        # Build TestRunState
-        tr = TestRunState(
+    # Register cancellation bridge
+    testrun_cancel_registration = nothing
+    if token !== nothing
+        testrun_cancel_registration = CancellationTokens.register(token) do
+            try put!(controller.reactor_channel, TestRunCancelledMsg(testrun_id)) catch end
+        end
+    end
+
+    # Filter invalid items (no package)
+    valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
+    test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
+
+    # Report items without package as failed
+    for i in test_items_without_package
+        controller.callbacks.on_testitem_failed(
             testrun_id,
-            profiles,
-            test_items,
-            [
-                TestSetupDetail(i.package_uri, i.name, i.kind, i.uri, i.line, i.column, i.code)
-                for i in test_setups
-            ];
-            token = token
+            i.id,
+            TestItemControllerProtocol.TestMessage[
+                TestItemControllerProtocol.TestMessage(
+                    message = "Test item '$(i.label)' is not inside a Julia package. Test items must be inside a package to be run.",
+                    expectedOutput = missing,
+                    actualOutput = missing,
+                    uri = i.uri,
+                    line = i.line,
+                    column = i.column
+                )
+            ],
+            missing
         )
+        delete!(tr.remaining_items, i.id)
+    end
 
-        # Register cancellation bridge
-        testrun_cancel_registration = nothing
-        if token !== nothing
-            testrun_cancel_registration = CancellationTokens.register(token) do
-                try put!(controller.reactor_channel, TestRunCancelledMsg(testrun_id)) catch end
-            end
-        end
-
-        # Filter invalid items (no package)
-        valid_test_items = Dict(i.id => i for i in test_items if i.package_name !== nothing && i.package_uri !== nothing)
-        test_items_without_package = [i for i in test_items if i.package_name === nothing || i.package_uri === nothing]
-
-        # Report items without package as failed
-        for i in test_items_without_package
-            controller.callbacks.on_testitem_failed(
-                testrun_id,
-                i.id,
-                TestItemControllerProtocol.TestMessage[
-                    TestItemControllerProtocol.TestMessage(
-                        message = "Test item '$(i.label)' is not inside a Julia package. Test items must be inside a package to be run.",
-                        expectedOutput = missing,
-                        actualOutput = missing,
-                        uri = i.uri,
-                        line = i.line,
-                        column = i.column
-                    )
-                ],
-                missing
-            )
-            delete!(tr.remaining_items, i.id)
-        end
-
-        if isempty(valid_test_items)
-            @warn "No valid test items to run"
-            if testrun_cancel_registration !== nothing
-                try close(testrun_cancel_registration) catch end
-            end
-            return missing
-        end
-
-        # Build environment mapping
-        testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
-        env_content_hash_by_env = Dict{TestEnvironment,Union{Nothing,String}}()
-
-        for i in values(valid_test_items)
-            te = _item_env(i, tr)
-            push!(get!(testitem_ids_by_env, te) do; String[]; end, i.id)
-            env_content_hash_by_env[te] = i.env_content_hash
-        end
-
-        # Calculate process counts
-        proc_count_by_env = Dict{TestEnvironment,Int}()
-        for (k, v) in pairs(testitem_ids_by_env)
-            as_share = length(v) / length(valid_test_items)
-            n_procs = max(1, min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items)))
-            proc_count_by_env[k] = n_procs
-        end
-
-        # Register test run with controller
-        controller.test_runs[testrun_id] = tr
-        transition!(tr.fsm, TestRunWaitingForProcs; reason="requesting procs")
-
-        # Build server-side test setup details
-        server_test_setups = [
-            TestItemServerProtocol.TestsetupDetails(
-                packageUri = i.package_uri,
-                name = i.name,
-                kind = i.kind,
-                uri = i.uri,
-                line = i.line,
-                column = i.column,
-                code = i.code
-            ) for i in test_setups
-        ]
-
-        # Request processes
-        put!(
-            controller.reactor_channel,
-            GetProcsForTestRunMsg(
-                testrun_id,
-                proc_count_by_env,
-                env_content_hash_by_env,
-                server_test_setups,
-                profiles[1].coverage_root_uris,
-                profiles[1].log_level
-            )
-        )
-
-        # Wait for completion
-        coverage_results = take!(tr.completion_channel)
-
-        @debug "Leaving execute_testrun" testrun_id
-
+    if isempty(valid_test_items)
+        @warn "No valid test items to run"
         if testrun_cancel_registration !== nothing
             try close(testrun_cancel_registration) catch end
         end
-
-        # Clean up test run state
-        delete!(controller.test_runs, testrun_id)
-
-        return coverage_results
+        return missing
     end
+
+    # Build environment mapping
+    testitem_ids_by_env = Dict{TestEnvironment,Vector{String}}()
+    env_content_hash_by_env = Dict{TestEnvironment,Union{Nothing,String}}()
+
+    for i in values(valid_test_items)
+        te = _item_env(i, tr)
+        push!(get!(testitem_ids_by_env, te) do; String[]; end, i.id)
+        env_content_hash_by_env[te] = i.env_content_hash
+    end
+
+    # Calculate process counts
+    proc_count_by_env = Dict{TestEnvironment,Int}()
+    for (k, v) in pairs(testitem_ids_by_env)
+        as_share = length(v) / length(valid_test_items)
+        n_procs = max(1, min(floor(Int, profiles[1].max_process_count * as_share), length(valid_test_items)))
+        proc_count_by_env[k] = n_procs
+    end
+
+    # Register test run with controller
+    controller.test_runs[testrun_id] = tr
+    transition!(tr.fsm, TestRunWaitingForProcs; reason="requesting procs")
+
+    # Build server-side test setup details
+    server_test_setups = [
+        TestItemServerProtocol.TestsetupDetails(
+            packageUri = i.package_uri,
+            name = i.name,
+            kind = i.kind,
+            uri = i.uri,
+            line = i.line,
+            column = i.column,
+            code = i.code
+        ) for i in test_setups
+    ]
+
+    # Request processes
+    put!(
+        controller.reactor_channel,
+        GetProcsForTestRunMsg(
+            testrun_id,
+            proc_count_by_env,
+            env_content_hash_by_env,
+            server_test_setups,
+            profiles[1].coverage_root_uris,
+            profiles[1].log_level
+        )
+    )
+
+    # Wait for completion
+    coverage_results = take!(tr.completion_channel)
+
+    @debug "Leaving execute_testrun" testrun_id
+
+    if testrun_cancel_registration !== nothing
+        try close(testrun_cancel_registration) catch end
+    end
+
+    # Clean up test run state
+    delete!(controller.test_runs, testrun_id)
+
+    return coverage_results
 end
