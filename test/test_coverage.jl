@@ -16,7 +16,8 @@
         result = TestHelpers.run_testrun(
             passing_items, discovered.setups;
             mode="Coverage",
-            coverage_root_uris=[coverage_root]
+            coverage_root_uris=[coverage_root],
+            timeout=600
         )
 
         passed_events = filter(e -> e.event == :passed, result.events)
@@ -64,7 +65,8 @@ end
         result = TestHelpers.run_testrun(
             items, discovered.setups;
             mode="Coverage",
-            coverage_root_uris=[coverage_root]
+            coverage_root_uris=[coverage_root],
+            timeout=600
         )
 
         passed_events = filter(e -> e.event == :passed, result.events)
@@ -109,7 +111,8 @@ end
         result = TestHelpers.run_testrun(
             failing_items, discovered.setups;
             mode="Coverage",
-            coverage_root_uris=[coverage_root]
+            coverage_root_uris=[coverage_root],
+            timeout=600
         )
 
         # The test item should have failed (not errored/crashed)
@@ -141,7 +144,8 @@ end
         result = TestHelpers.run_testrun(
             passing_items, discovered.setups;
             mode="Coverage",
-            coverage_root_uris=[fake_root]
+            coverage_root_uris=[fake_root],
+            timeout=600
         )
 
         # Test should still pass
