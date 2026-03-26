@@ -254,17 +254,6 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
 
     JSONRPC.start(endpoint)
 
-    # Post-connection watchdog: if the OS process exits (e.g. stack overflow crash),
-    # close the socket to unblock the JSONRPC layer promptly.
-    @async try
-        wait(jl_process)
-        if !CancellationTokens.is_cancellation_requested(token)
-            @warn "Test process exited unexpectedly, closing socket" testprocess_id exitcode=jl_process.exitcode
-            try close(socket) catch end
-        end
-    catch
-    end
-
     @debug "Notifying reactor that process launched" testprocess_id
     put!(reactor_channel, TestProcessLaunchedMsg(testprocess_id, jl_process, endpoint))
 
