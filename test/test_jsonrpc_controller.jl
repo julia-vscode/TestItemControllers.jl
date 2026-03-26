@@ -66,8 +66,7 @@ end
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
     try
-        err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-        jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+        jr_controller = JSONRPCTestItemController(server_sock, server_sock)
         @test jr_controller isa JSONRPCTestItemController
         @test isdefined(jr_controller, :controller)
         @test isdefined(jr_controller, :endpoint)
@@ -84,8 +83,7 @@ end
 
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
-    err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-    jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+    jr_controller = JSONRPCTestItemController(server_sock, server_sock)
 
     # Start the controller (runs endpoint + reactor)
     controller_task = @async try
@@ -215,8 +213,7 @@ end
 
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
-    err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-    jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+    jr_controller = JSONRPCTestItemController(server_sock, server_sock)
 
     controller_task = @async try
         run(jr_controller)
@@ -305,8 +302,7 @@ end
 
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
-    err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-    jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+    jr_controller = JSONRPCTestItemController(server_sock, server_sock)
 
     controller_task = @async try
         run(jr_controller)
@@ -401,8 +397,7 @@ end
 
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
-    err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-    jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+    jr_controller = JSONRPCTestItemController(server_sock, server_sock)
 
     controller_task = @async try
         run(jr_controller)
@@ -483,8 +478,7 @@ end
 
     server_sock, client_sock = JSONRPCHelpers.get_connected_sockets()
 
-    err_handler = (err, bt) -> @error "Test error handler" exception=(err, bt)
-    jr_controller = JSONRPCTestItemController(server_sock, server_sock, err_handler)
+    jr_controller = JSONRPCTestItemController(server_sock, server_sock)
 
     controller_task = @async try
         run(jr_controller)
