@@ -254,7 +254,8 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
             haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) == ProcessIdle
         end
 
-        @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv: $(k.env)\n\nWe need $v procs, there are $(length(pool_ids)) processes, of which $(length(existing_idle_ids)) are idle."
+        env_str = join(("  $ek = $ev" for (ek, ev) in k.env), "\n")
+        @info "Test environment\n\nProject Uri: $(k.project_uri)\nPackage Uri: $(k.package_uri)\nPackage Name: $(k.package_name)\nJulia command: $(k.juliaCmd)\nJulia args: $(k.juliaArgs)\nJulia Num Threads: $(k.juliaNumThreads)\nMode: $(k.mode)\nEnv:\n$env_str\n\nWe need $v procs, there are $(length(pool_ids)) processes, of which $(length(existing_idle_ids)) are idle."
 
         # Grab existing idle procs
         for pid in Iterators.take(existing_idle_ids, v)
