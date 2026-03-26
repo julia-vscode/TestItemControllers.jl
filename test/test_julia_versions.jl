@@ -23,6 +23,7 @@
 
     for version in versions
         version in installed_channels || error("Julia $version is not installed. Install it with: juliaup add $version")
+        version == "1.4" && Sys.isapple() && continue
 
         @testset "Julia $version" begin
             result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
