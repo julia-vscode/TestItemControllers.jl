@@ -90,12 +90,12 @@
         return (items=items, setups=setups)
     end
 
-    function make_test_profile(; mode="Run", max_procs=1, coverage_root_uris=nothing, log_level=:Debug)
+    function make_test_profile(; mode="Run", max_procs=1, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[])
         TestProfile(
             "test-profile-1",
             "Test Profile",
-            joinpath(Sys.BINDIR, "julia"),
-            String[],
+            julia_cmd,
+            julia_args,
             missing,
             Dict{String,Union{String,Nothing}}(),
             max_procs,
@@ -105,7 +105,7 @@
         )
     end
 
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[])
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -135,7 +135,7 @@
         )
 
         controller = TestItemController(callbacks; log_level=log_level)
-        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris, log_level=log_level)
+        profile = make_test_profile(; mode=mode, max_procs=max_procs, coverage_root_uris=coverage_root_uris, log_level=log_level, julia_cmd=julia_cmd, julia_args=julia_args)
         testrun_id = string(UUIDs.uuid4())
 
         controller_task = @async try

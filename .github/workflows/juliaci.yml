@@ -14,6 +14,7 @@ jobs:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
       filter: 'dirname(filename) == joinpath(pwd(), "test")'
+      github_job_prep_script: 'scripts/install_julia_versions.jl'
     permissions: write-all
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}

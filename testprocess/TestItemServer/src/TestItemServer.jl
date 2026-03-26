@@ -588,7 +588,7 @@ end
 function create_test_message_for_failed(i)
     (expected, actual) = extract_expected_and_actual(i)
 
-    stack_frames = if hasproperty(i, :backtrace) && i.backtrace isa AbstractString && !isempty(i.backtrace)
+    stack_frames = if :backtrace in fieldnames(typeof(i)) && i.backtrace isa AbstractString && !isempty(i.backtrace)
         parse_backtrace_string(i.backtrace)
     else
         missing
