@@ -21,7 +21,7 @@
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -60,7 +60,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -99,7 +99,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -138,7 +138,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -177,7 +177,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -216,7 +216,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -255,7 +255,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -294,7 +294,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -333,7 +333,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -372,7 +372,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -411,7 +411,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -450,7 +450,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
@@ -489,7 +489,7 @@ end
     items = filter(i -> i.label in target_labels, discovered.items)
     @test length(items) == 4
 
-    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"])
+    result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
     passed_events = filter(e -> e.event == :passed, result.events)
     failed_events = filter(e -> e.event == :failed, result.events)
