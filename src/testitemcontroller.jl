@@ -568,6 +568,7 @@ function handle!(c::TestItemController, msg::TestItemStartedMsg)
         item = tr.remaining_items[msg.testitem_id]
         ps.current_testitem_id = msg.testitem_id
         ps.current_testitem_started_at = time()
+        ps.has_started_items = true
 
         if item.timeout !== nothing
             ps.timeout_cs = CancellationTokens.CancellationTokenSource(item.timeout)
@@ -922,10 +923,38 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
             end
             _check_testrun_complete!(c, tr)
             return false
+        elseif ps !== nothing && !ps.has_started_items
+            # Process reached ProcessRunning but crashed before any TestItemStartedMsg
+            # was received — no item ever began executing. Error all queued items.
+            @info "Test process '$(terminated_proc_id)' crashed before starting any test item, erroring $(length(items_to_redistribute)) queued item(s)"
+            for testitem_id in items_to_redistribute
+                if haskey(tr.remaining_items, testitem_id)
+                    item = tr.remaining_items[testitem_id]
+                    delete!(tr.remaining_items, testitem_id)
+                    c.callbacks.on_testitem_errored(
+                        msg.testrun_id,
+                        testitem_id,
+                        TestItemControllerProtocol.TestMessage[
+                            TestItemControllerProtocol.TestMessage(
+                                message = "Test process crashed before starting test item '$(item.label)'",
+                                expectedOutput = missing,
+                                actualOutput = missing,
+                                uri = item.uri,
+                                line = item.line,
+                                column = item.column
+                            )
+                        ],
+                        missing
+                    )
+                end
+            end
+            _check_testrun_complete!(c, tr)
+            return false
+        else
+            # Process was functional and was killed after running items (e.g., timeout).
+            # Fall through to redistribute remaining un-started items.
+            @info "Test process '$(terminated_proc_id)' terminated after running items, redistributing $(length(items_to_redistribute)) remaining item(s)"
         end
-        # else: process was functional and was killed after running items (e.g., timeout).
-        # Fall through to redistribute remaining un-started items.
-        @info "Test process '$(terminated_proc_id)' terminated after running items, redistributing $(length(items_to_redistribute)) remaining item(s)"
     end
 
     # Redistribute remaining un-started items (if any) to another process.

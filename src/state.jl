@@ -13,6 +13,7 @@ mutable struct TestProcessState
     debug_pipe_name::String
     current_testitem_id::Union{Nothing,String}
     current_testitem_started_at::Union{Nothing,Float64}
+    has_started_items::Bool
     timeout_cs::Union{Nothing,CancellationTokens.CancellationTokenSource}
     timeout_reg::Any  # Union{Nothing,CancellationTokens.CancellationTokenRegistration}
     # Process lifecycle
@@ -43,6 +44,7 @@ function TestProcessState(id::String, env::TestEnvironment;
         JSONRPC.generate_pipe_name(),                   # debug_pipe_name
         nothing,                                        # current_testitem_id
         nothing,                                        # current_testitem_started_at
+        false,                                          # has_started_items
         nothing,                                        # timeout_cs
         nothing,                                        # timeout_reg
         CancellationTokens.CancellationTokenSource(),   # cs
