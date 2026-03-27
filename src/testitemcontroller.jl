@@ -350,6 +350,7 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
             # Create TestProcessState and register it
             ps = TestProcessState(testprocess_id, k;
                 is_precompile_process=this_is_the_precompile_proc,
+                precompile_done=!precompile_required,
                 test_env_content_hash=env_hash)
             c.test_processes[testprocess_id] = ps
 
